@@ -3,7 +3,8 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>FERROLINE — Tactical FPS</title>
+<title>FERROLINE — 5v5 Plant/Defuse Tactical FPS · Buy Economy · Team Bots · Grenades</title>
+<meta name="description" content="FERROLINE is a round-based 5v5 tactical FPS: plant or defuse the spike, buy four guns, armour and a frag grenade with round money, and fight beside team bots that follow routes, hold angles and react to sound.">
 <style>
   /* Look plan: dusk canvas, steel surface, hairline borders, warm ink, muted grey-blue,
      one hazard-amber accent. Every colour below is one of the palette. */
@@ -136,6 +137,10 @@
   .panel h1 { margin: 0 0 8px; font-size: 34px; line-height: 1.15; font-weight: 500; letter-spacing: -0.02em; }
   .panel h1 .tag { color: var(--accent); }
   .panel p { margin: 0 0 24px; max-width: 46ch; font-size: 16px; line-height: 1.5; color: var(--muted); }
+  .panel .tagline { margin: -4px 0 16px; font-family: var(--font-readout); font-size: 13px; letter-spacing: .18em; color: var(--accent); }
+  .briefing { margin: 0 0 24px; padding: 0; list-style: none; display: grid; gap: 8px; font-size: 14px; line-height: 1.45; color: var(--ink); }
+  .briefing li { padding-left: 16px; position: relative; }
+  .briefing li::before { content: '◆'; position: absolute; left: 0; top: 1px; font-size: 10px; color: var(--accent); }
   #play { font: inherit; font-weight: 500; padding: 12px 16px; border: 1px solid var(--accent); border-radius: var(--radius-control); background: var(--accent); color: var(--canvas); cursor: pointer; }
   #play:hover { background: var(--ink); border-color: var(--ink); }
   .keys { margin: 24px 0 0; padding: 0; list-style: none; display: grid; gap: 8px; font-size: 14px; color: var(--muted); }
@@ -196,7 +201,16 @@
 <div id="overlay" class="overlay">
   <section class="panel" role="dialog" aria-modal="true" aria-labelledby="overlay-title">
     <h1 id="overlay-title">FERROLINE<span class="tag">.</span></h1>
+    <p class="tagline">5v5 · PLANT / DEFUSE</p>
     <p id="overlay-copy">A dusk rail yard. Two teams, one spike. Plant it at Crane Deck or the Depot — or stop the plant. First to 7 rounds takes the match.</p>
+    <ul class="briefing">
+      <li>Round-based 5v5 — first to 7 rounds takes the match.</li>
+      <li>Plant the spike at Crane Deck or the Depot, or defuse it (hold E).</li>
+      <li>Buy economy — earn money every round and spend it on four guns, armour and a frag grenade.</li>
+      <li>Team bots — they follow routes, hold angles and react to gunfire and explosions.</li>
+      <li>Headshots deal extra damage; recoil and spread punish firing on the move.</li>
+      <li>WASD to move, mouse to aim, click to fire — R reloads, B opens the shop.</li>
+    </ul>
     <button id="play" type="button">Click to play</button>
     <ul class="keys">
       <li><kbd>W</kbd><kbd>A</kbd><kbd>S</kbd><kbd>D</kbd> Move</li>
