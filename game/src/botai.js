@@ -1,54 +1,108 @@
-// Bot brains: routes, holds, engages, plants, defuses. One stepBot call
-// per bot per tick; the brain is a small state machine over the states
-// game.js assigns — 'advance' along a waypoint path, 'hold' on an angle,
-// 'rotate' to a planted spike, 'plant' and 'defuse' while channelling.
+// FERROLINE bot AI — one brain per bot, driven by the match context.
 //
-// Two rules shape everything here. First, combat is live-phase only: the
-// brain never scans, aims or shoots unless ctx.phase is 'live', so the buy
-// phase stays bloodless even though the bots keep walking to their holds.
-// Second, walking never wedges: walkTo watches for no progress and, after
-// a second of standing still, sidesteps perpendicular to its heading
-// (alternating sides) and re-paths if that still fails, so a bot facing a
-// post dead-on slides around it instead of pushing forever.
+// A bot is a state machine: it walks its waypoint path (advance / rotate),
+// holds its angle (hold), channels the spike (plant / defuse), or is dead.
+// The carrier tries to plant whenever it stands inside a site, whatever
+// state it is in; a defender routes to the planted site and defuses when
+// close. Combat runs in every walking/holding state: the bot scans for
+// foes on a short countdown, turns to face a new target after a human-like
+// reaction delay, and fires in bursts. Objectives are checked through the
+// context callbacks, which return whether the channel actually started —
+// the AI only enters a channel state on a true return, and re-checks the
+// channel every tick so a cancelled or stolen channel recovers instead of
+// wedging.
 //
-// Fights are bursts with a reaction delay: a bot that spots an enemy
-// waits a beat, fires three to five rounds with an aim error that grows
-// with distance and movement, then pauses. It reloads when its magazine
-// runs dry, turns toward loud noises while holding, and — when it carries
-// the spike — plants as soon as it stands inside a site.
+// Movement walks the path with axis-separated steps (so a bot slides along
+// a wall instead of stopping on it). A bot that has not moved for a second
+// starts sidestepping, flipping side each time the slide is itself blocked;
+// a node that makes no progress for three seconds is skipped. The brain
+// (bot._ai) is created lazily on the first step and survives round resets;
+// resetBot only clears the fields that must not leak across rounds.
 import * as THREE from 'three';
 
-const WALK_SPEED = 3.6;
-const ARRIVE_DIST = 0.5;
-const TURN_RATE = 7;
-const SCAN_EVERY = 0.12;
-const ENGAGE_RANGE = 45;
-const REACT_MIN = 0.25;
-const REACT_VAR = 0.35;
-const BURST_MIN = 3;
-const BURST_VAR = 3;
-const BURST_PAUSE_MIN = 0.45;
-const BURST_PAUSE_VAR = 0.5;
-const AIM_BASE = 0.014;
-const AIM_PER_METER = 0.0011;
-const AIM_MOVING_TARGET = 0.012;
-const AIM_MOVING_SELF = 0.01;
-const STUCK_AFTER = 1.0;
-const NODE_SKIP_AFTER = 3.0;
-const STILL_EPS = 0.03;
-const SIDESTEP_TIME = 0.6;
-const NOISE_HEAR_DIST = 30;
-const NOISE_FRESH = 1.0;
-const HOLD_SWAY = 0.3;
-const PLANT_NODES = { A: 'aPlant', B: 'bPlant' };
-const DEFUSE_REACH = 2.2;
+// ---- tuning ----
+const WALK_SPEED = 3.6; // units per second on foot
+const ARRIVE_DIST = 0.5; // close enough to a waypoint to take the next one
+const NODE_TIMEOUT = 3; // seconds without progress before a node is skipped
+const PROGRESS_STEP = 0.03; // a shrinking distance that counts as progress
+const STILL_STEP = 0.03; // accumulated displacement that counts as "moved"
+const STILL_SIDESTEP_AFTER = 1; // seconds without moving before sidestepping
+const SIDESTEP_TIME = 0.6; // seconds a sidestep lasts
+const TURN_RATE = 7; // rad/s for every turn the bot makes
+const SWAY_RATE = 0.5; // rad/s of the hold sway
+const SWAY_AMP = 0.3; // radians of hold sway
+const SCAN_EVERY = 0.12; // seconds between foe scans
+const REACT_MIN = 0.25; // reaction delay, minimum
+const REACT_VAR = 0.35; // reaction delay, extra random span
+const BURST_MIN = 3; // shots per burst, minimum
+const BURST_VAR = 3; // shots per burst, extra random span
+const BURST_PAUSE_MIN = 0.45; // pause between bursts, minimum
+const BURST_PAUSE_VAR = 0.5; // pause between bursts, extra random span
+const TARGET_RANGE = 45; // foes farther away than this are ignored
+const NOISE_HEAR = 30; // how far away a noise can be heard
+const NOISE_KEEP = 1.5; // seconds a heard noise stays fresh
+const DEFUSE_REACH = 2.2; // how close a defuser must stand to the spike
+const SITE_PROBE_H = 0.5; // height used for the site-zone probe
+const EYE_BOT = 1.2; // aim height for a bot foe
+const EYE_PLAYER = 1.25; // aim height for the player foe
 
-function nearestNodeId(world, x, z) {
+// The world is captured once at creation; every helper below closes over it.
+let world = null;
+
+const tmpV = new THREE.Vector3();
+
+function clampTurn(from, to, maxStep) {
+  const d = Math.atan2(Math.sin(to - from), Math.cos(to - from));
+  if (d > maxStep) return from + maxStep;
+  if (d < -maxStep) return from - maxStep;
+  return to;
+}
+
+function turnBot(bot, angle, dt) {
+  bot.yaw = clampTurn(bot.yaw, angle, TURN_RATE * dt);
+  bot.group.rotation.y = bot.yaw;
+}
+
+function yawToward(x, z, tx, tz) {
+  return Math.atan2(tx - x, tz - z);
+}
+
+function freshBrain(bot) {
+  return {
+    target: null,
+    distance: Infinity,
+    scanT: 0,
+    reactUntil: 0,
+    burstPauseUntil: 0,
+    burstLeft: 0,
+    noiseSeen: -1,
+    noiseUntil: 0,
+    noiseYaw: 0,
+    swayPhase: Math.random() * Math.PI * 2,
+    stillT: 0,
+    sideT: 0,
+    sideDir: 1,
+    repaths: 0,
+    nodeIdx: -1,
+    nodeStuckT: 0,
+    bestDistance: Infinity,
+    lastX: bot.group.position.x,
+    lastZ: bot.group.position.z,
+  };
+}
+
+function brainOf(bot) {
+  if (!bot._ai) bot._ai = freshBrain(bot);
+  return bot._ai;
+}
+
+function nearestNodeId(bot) {
   let best = null;
   let bestD = Infinity;
   for (const id of Object.keys(world.waypoints.nodes)) {
-    const [nx, nz] = world.waypoints.nodes[id];
-    const d = (nx - x) * (nx - x) + (nz - z) * (nz - z);
+    const n = world.waypoints.nodes[id];
+    const d = (n[0] - bot.group.position.x) * (n[0] - bot.group.position.x)
+      + (n[1] - bot.group.position.z) * (n[1] - bot.group.position.z);
     if (d < bestD) {
       bestD = d;
       best = id;
@@ -57,382 +111,292 @@ function nearestNodeId(world, x, z) {
   return best;
 }
 
-function nodePos(world, id) {
-  const n = world.waypoints.nodes[id];
-  return n ? { x: n[0], z: n[1] } : null;
+function setPath(bot, goal) {
+  let route;
+  try {
+    route = bot.findPath ? bot.findPath(nearestNodeId(bot), goal) : null;
+  } catch (e) {
+    route = null;
+  }
+  bot.path = route && route.length ? route : [goal];
+  bot.pathIndex = 0;
+  bot.afterMid = bot.afterMid || null;
+  const brain = brainOf(bot);
+  brain.nodeIdx = -1;
+  brain.nodeStuckT = 0;
+  brain.bestDistance = Infinity;
 }
 
-function turnToward(current, target, maxStep) {
-  let diff = target - current;
-  while (diff > Math.PI) diff -= Math.PI * 2;
-  while (diff < -Math.PI) diff += Math.PI * 2;
-  if (Math.abs(diff) <= maxStep) return target;
-  return current + Math.sign(diff) * maxStep;
+function plantNodeFor(site) {
+  return site === 'A' ? 'aPlant' : 'bPlant';
 }
 
-function yawToward(bot, tx, tz) {
-  const dx = tx - bot.group.position.x;
-  const dz = tz - bot.group.position.z;
-  return Math.atan2(dx, dz);
+// ---- planting: the carrier plants whenever it stands inside a site,
+// whatever it was doing. Returns true when a channel started. ----
+function tryPlant(bot, ctx) {
+  if (!bot.isCarrier || !ctx.bomb || ctx.bomb.status !== 'carried') return false;
+  const zone = world.sites[bot.site] ? world.sites[bot.site].zone : null;
+  const p = bot.group.position;
+  if (!zone || !zone.containsPoint(tmpV.set(p.x, p.y + SITE_PROBE_H, p.z))) return false;
+  if (!ctx.plantStart(bot)) return false;
+  bot.state = 'plant';
+  return true;
 }
 
-export function createBotAI(world) {
-  const scratch = new THREE.Vector3();
-
-  function setPath(bot, goalId) {
-    const start = nearestNodeId(world, bot.group.position.x, bot.group.position.z);
-    let path = [];
-    if (bot.findPath) {
-      try {
-        path = bot.findPath(start, goalId) || [];
-      } catch {
-        path = [];
-      }
-    }
-    if (!path.length) path = [goalId];
-    bot.path = path;
-    bot.pathIndex = 0;
-    bot.afterMid = bot.afterMid || null;
+// ---- hearing: walk the batch newest-first; an inaudible noise never
+// masks an older audible one, and the whole batch is marked seen. ----
+function listenForNoise(bot, ctx, brain) {
+  const p = bot.group.position;
+  let newest = brain.noiseSeen;
+  const sounds = ctx.noise || [];
+  for (let i = sounds.length - 1; i >= 0; i--) {
+    const sound = sounds[i];
+    if (sound.time > newest) newest = sound.time;
+    if (sound.time <= brain.noiseSeen) continue;
+    if (Math.hypot(sound.pos.x - p.x, sound.pos.z - p.z) > NOISE_HEAR) continue;
+    brain.noiseYaw = yawToward(p.x, p.z, sound.pos.x, sound.pos.z);
+    brain.noiseUntil = ctx.time + NOISE_KEEP;
+    break;
   }
+  brain.noiseSeen = newest;
+}
 
-  function ensureBrain(bot) {
-    if (!bot._ai) {
-      bot._ai = {
-        scanT: 0,
-        target: null,
-        reactUntil: 0,
-        burstLeft: 0,
-        burstPauseUntil: 0,
-        lastX: bot.group.position.x,
-        lastZ: bot.group.position.z,
-        stillT: 0,
-        sideT: 0,
-        sideDir: 1,
-        repaths: 0,
-        noiseSeen: -1,
-        noiseYaw: 0,
-        noiseUntil: 0,
-        swayPhase: Math.random() * Math.PI * 2,
-      };
-    }
-    return bot._ai;
+// ---- combat: scan on a countdown, aim, fire in bursts. ----
+function combatStep(bot, dt, ctx, brain) {
+  if (ctx.phase !== 'live') {
+    brain.target = null;
+    brain.burstLeft = 0;
+    return;
   }
-
-  // Walk one tick toward the current path node. Returns 'arrived' when the
-  // path is done, 'walking' while moving, 'stuck' while sidestepping.
-  function walkTo(bot, dt, ctx, brain) {
-    if (!bot.path || bot.pathIndex >= bot.path.length) return 'arrived';
-    const node = nodePos(world, bot.path[bot.pathIndex]);
-    if (!node) {
-      bot.pathIndex += 1;
-      return 'walking';
-    }
-    // Unreachable-node skip: some waypoint nodes sit inside solid
-    // geometry (a site on the crane deck, a hold tight against it) and
-    // no amount of sidestepping gets the bot onto them. If one node eats
-    // three seconds without arrival, drop it and walk on — the bot holds
-    // where it stands, which is close enough to fight from.
-    if (brain.nodeIdx !== bot.pathIndex) {
-      brain.nodeIdx = bot.pathIndex;
-      brain.nodeStuckT = 0;
-    } else {
-      brain.nodeStuckT = (brain.nodeStuckT || 0) + dt;
-      if (brain.nodeStuckT > NODE_SKIP_AFTER) {
-        bot.pathIndex += 1;
-        brain.nodeIdx = bot.pathIndex;
-        brain.nodeStuckT = 0;
-        brain.stillT = 0;
-        brain.sideT = 0;
-        return bot.pathIndex >= bot.path.length ? 'arrived' : 'walking';
-      }
-    }
-    const pos = bot.group.position;
-    const dx = node.x - pos.x;
-    const dz = node.z - pos.z;
-    const dist = Math.hypot(dx, dz);
-    if (dist < ARRIVE_DIST) {
-      bot.pathIndex += 1;
-      brain.stillT = 0;
-      return bot.pathIndex >= bot.path.length ? 'arrived' : 'walking';
-    }
-    // Sidestepping: slide perpendicular to the heading for a short burst.
-    if (brain.sideT > 0) {
-      brain.sideT -= dt;
-      const px = -dz / (dist || 1);
-      const pz = dx / (dist || 1);
-      const sx = pos.x + px * brain.sideDir * WALK_SPEED * dt;
-      const sz = pos.z + pz * brain.sideDir * WALK_SPEED * dt;
-      if (!ctx.blocked(sx, sz)) {
-        pos.x = sx;
-        pos.z = sz;
-      } else {
-        brain.sideDir *= -1;
-      }
-      bot.yaw = turnToward(bot.yaw, Math.atan2(dx, dz), TURN_RATE * dt);
-      bot.group.rotation.y = bot.yaw;
-      return 'stuck';
-    }
-    const step = WALK_SPEED * dt;
-    const nx = pos.x + (dx / dist) * step;
-    const nz = pos.z + (dz / dist) * step;
-    if (!ctx.blocked(nx, nz)) {
-      pos.x = nx;
-      pos.z = nz;
-    } else if (!ctx.blocked(nx, pos.z)) {
-      pos.x = nx;
-    } else if (!ctx.blocked(pos.x, nz)) {
-      pos.z = nz;
-    }
-    bot.yaw = turnToward(bot.yaw, Math.atan2(dx, dz), TURN_RATE * dt);
-    bot.group.rotation.y = bot.yaw;
-    // Stuck watch: no real movement while trying to walk means wedged.
-    const moved = Math.hypot(pos.x - brain.lastX, pos.z - brain.lastZ);
-    if (moved < STILL_EPS) {
-      brain.stillT += dt;
-      if (brain.stillT > STUCK_AFTER) {
-        brain.stillT = 0;
-        brain.sideDir *= -1;
-        brain.sideT = SIDESTEP_TIME;
-        brain.repaths += 1;
-        if (brain.repaths >= 3) {
-          brain.repaths = 0;
-          const goal = bot.path[bot.path.length - 1];
-          setPath(bot, goal);
-        }
-      }
-    } else {
-      brain.stillT = 0;
-      brain.lastX = pos.x;
-      brain.lastZ = pos.z;
-    }
-    return 'walking';
-  }
-
-  function visibleEnemies(bot, ctx) {
-    const foes = ctx.enemiesOf(bot);
-    const eye = scratch.set(bot.group.position.x, bot.group.position.y + 1.55, bot.group.position.z);
-    const out = [];
-    for (const foe of foes) {
+  brain.scanT -= dt;
+  if (brain.scanT <= 0) {
+    brain.scanT = SCAN_EVERY;
+    let selected = null;
+    let closest = Infinity;
+    const p = bot.group.position;
+    for (const foe of ctx.enemiesOf(bot) || []) {
       if (!foe.alive) continue;
-      const fx = foe.pos.x;
-      const fz = foe.pos.z;
-      const d = Math.hypot(fx - bot.group.position.x, fz - bot.group.position.z);
-      if (d > ENGAGE_RANGE) continue;
-      const chestY = foe.isPlayer ? foe.pos.y + 1.25 : foe.pos.y + 1.2;
-      if (!ctx.los(eye.x, eye.y, eye.z, fx, chestY, fz)) continue;
-      out.push({ foe, dist: d });
+      const d = Math.hypot(foe.pos.x - p.x, foe.pos.z - p.z);
+      if (d > TARGET_RANGE || d >= closest) continue;
+      const aimY = foe.isPlayer ? EYE_PLAYER : EYE_BOT;
+      if (!ctx.los(p.x, p.y + 1.55, p.z, foe.pos.x, foe.pos.y + aimY, foe.pos.z)) continue;
+      selected = foe;
+      closest = d;
     }
-    out.sort((a, b) => a.dist - b.dist);
-    return out;
-  }
-
-  function aimError(bot, target) {
-    let err = AIM_BASE + target.dist * AIM_PER_METER;
-    if (target.foe.vel && (Math.abs(target.foe.vel.x) > 0.5 || Math.abs(target.foe.vel.z) > 0.5)) {
-      err += AIM_MOVING_TARGET;
-    }
-    if (bot.state === 'advance' || bot.state === 'rotate') err += AIM_MOVING_SELF;
-    return err;
-  }
-
-  function engage(bot, dt, ctx, brain) {
-    if (ctx.phase !== 'live') {
-      brain.target = null;
+    const previous = brain.target;
+    if (selected && (!previous || selected.isPlayer !== previous.foe.isPlayer || selected.bot !== previous.foe.bot)) {
+      brain.reactUntil = ctx.time + REACT_MIN + Math.random() * REACT_VAR;
       brain.burstLeft = 0;
-      return;
     }
-    brain.scanT -= dt;
-    if (brain.scanT <= 0) {
-      brain.scanT = SCAN_EVERY;
-      const seen = visibleEnemies(bot, ctx);
-      const next = seen.length ? seen[0] : null;
-      // Compare the fighter behind the entry, not the entry itself:
-      // enemiesOf builds a fresh wrapper object on every call, so an
-      // object-identity check would see a "new" target each scan and
-      // reset the reaction delay forever — the bot would never fire.
-      if (next && (!brain.target || brain.target.foe.bot !== next.foe.bot)) {
-        brain.reactUntil = ctx.time + REACT_MIN + Math.random() * REACT_VAR;
-        brain.burstLeft = 0;
-      }
-      brain.target = next;
-    }
-    const target = brain.target;
-    if (!target) return;
-    const foe = target.foe;
-    const aimAt = foe.isPlayer
-      ? { x: foe.pos.x, y: foe.pos.y + 1.25, z: foe.pos.z }
-      : { x: foe.pos.x, y: foe.pos.y + 1.2, z: foe.pos.z };
-    bot.yaw = turnToward(bot.yaw, yawToward(bot, aimAt.x, aimAt.z), TURN_RATE * dt);
-    bot.group.rotation.y = bot.yaw;
-    if (ctx.time < brain.reactUntil) return;
-    if (ctx.time < brain.burstPauseUntil) return;
-    const gun = bot.loadout;
-    if (!gun.ready()) return;
-    if (brain.burstLeft <= 0) {
-      brain.burstLeft = BURST_MIN + Math.floor(Math.random() * BURST_VAR);
-    }
-    if (!gun.takeRound()) {
-      gun.reload();
-      brain.burstLeft = 0;
-      return;
-    }
-    ctx.botShoot(bot, foe, aimError(bot, target), gun.def());
-    gun.pullTrigger();
-    brain.burstLeft -= 1;
-    if (brain.burstLeft <= 0) {
-      brain.burstPauseUntil = ctx.time + BURST_PAUSE_MIN + Math.random() * BURST_PAUSE_VAR;
-    }
+    brain.target = selected ? { foe: selected } : null;
+    brain.distance = closest;
   }
-
-  function listenForNoise(bot, ctx, brain) {
-    const noises = ctx.noise || [];
-    for (let i = noises.length - 1; i >= 0; i -= 1) {
-      const n = noises[i];
-      if (n.time <= brain.noiseSeen) continue;
-      brain.noiseSeen = n.time;
-      const d = Math.hypot(n.pos.x - bot.group.position.x, n.pos.z - bot.group.position.z);
-      if (d > NOISE_HEAR_DIST) continue;
-      brain.noiseYaw = Math.atan2(n.pos.x - bot.group.position.x, n.pos.z - bot.group.position.z);
-      brain.noiseUntil = ctx.time + 1.5;
-    }
+  const target = brain.target;
+  if (!target || !target.foe.alive) return;
+  const foe = target.foe;
+  const p = bot.group.position;
+  turnBot(bot, yawToward(p.x, p.z, foe.pos.x, foe.pos.z), dt);
+  if (ctx.time < brain.reactUntil) return;
+  if (ctx.time < brain.burstPauseUntil) return;
+  const gun = bot.loadout;
+  if (!gun.ready()) return;
+  if (brain.burstLeft <= 0) {
+    brain.burstLeft = BURST_MIN + Math.floor(Math.random() * BURST_VAR);
   }
-
-  function tryPlant(bot, ctx) {
-    if (!bot.isCarrier) return false;
-    if (!ctx.bomb || ctx.bomb.status !== 'carried') return false;
-    const site = world.sites[bot.site];
-    if (!site) return false;
-    const pos = bot.group.position;
-    scratch.set(pos.x, pos.y + 0.5, pos.z);
-    if (!site.zone.containsPoint(scratch)) return false;
-    if (ctx.plantStart(bot)) {
-      bot.state = 'plant';
-      return true;
+  if (!gun.takeRound()) {
+    // Empty magazine: reload if there is reserve, otherwise fall back to
+    // the stocked sidearm instead of standing dry.
+    if (!gun.reload() && gun.state.current !== 'pistol') {
+      const ammo = gun.ammoText();
+      if (ammo.mag === 0 && ammo.reserve === 0) gun.switchTo('pistol');
     }
+    brain.burstLeft = 0;
+    return;
+  }
+  let error = 0.014 + brain.distance * 0.0011;
+  if (foe.vel && (Math.abs(foe.vel.x) > 0.5 || Math.abs(foe.vel.z) > 0.5)) error += 0.012;
+  if (bot.state === 'advance' || bot.state === 'rotate') error += 0.010;
+  ctx.botShoot(bot, foe, error, gun.def());
+  gun.pullTrigger();
+  brain.burstLeft -= 1;
+  if (brain.burstLeft <= 0) {
+    brain.burstPauseUntil = ctx.time + BURST_PAUSE_MIN + Math.random() * BURST_PAUSE_VAR;
+  }
+}
+
+// ---- movement: axis-separated steps so a bot slides along a wall;
+// a bot that has not moved for a second sidesteps, and a node that
+// makes no progress is skipped. Returns true when the path is done. ----
+function translate(bot, dx, dz, ctx) {
+  const p = bot.group.position;
+  if (!ctx.blocked || !ctx.blocked(p.x + dx, p.z + dz)) {
+    p.x += dx;
+    p.z += dz;
+  } else if (!ctx.blocked(p.x + dx, p.z)) {
+    p.x += dx;
+  } else if (!ctx.blocked(p.x, p.z + dz)) {
+    p.z += dz;
+  }
+}
+
+function walkPath(bot, dt, ctx, brain) {
+  if (!bot.path || bot.pathIndex >= bot.path.length) return true;
+  const nodeId = bot.path[bot.pathIndex];
+  const node = world.waypoints.nodes[nodeId];
+  if (!node) {
+    // Missing waypoint: drop it and stay walking this tick, so the
+    // arrival transition is delayed by one tick.
+    bot.pathIndex += 1;
     return false;
   }
-
-  function walkToPlant(bot, ctx) {
-    const node = PLANT_NODES[bot.site] || 'aPlant';
-    setPath(bot, node);
-    bot.state = 'advance';
+  const p = bot.group.position;
+  const dx = node[0] - p.x;
+  const dz = node[1] - p.z;
+  const distance = Math.hypot(dx, dz);
+  if (distance < ARRIVE_DIST) {
+    bot.pathIndex += 1;
+    brain.stillT = 0;
+    brain.nodeIdx = -1;
+    return bot.pathIndex >= bot.path.length;
   }
-
-  function tryDefuse(bot, ctx) {
-    if (bot.role !== 'defend') return false;
-    if (!ctx.bomb || ctx.bomb.status !== 'planted' || !ctx.bomb.plantPos) return false;
-    const pos = bot.group.position;
-    const d = Math.hypot(ctx.bomb.plantPos.x - pos.x, ctx.bomb.plantPos.z - pos.z);
-    if (d > DEFUSE_REACH) return false;
-    if (ctx.defuseStart(bot)) {
-      bot.state = 'defuse';
-      return true;
-    }
-    return false;
+  if (brain.nodeIdx !== bot.pathIndex) {
+    brain.nodeIdx = bot.pathIndex;
+    brain.bestDistance = distance;
+    brain.nodeStuckT = 0;
   }
-
-  function stepBot(bot, dt, ctx) {
-    if (!bot.alive) return;
-    const brain = ensureBrain(bot);
-    const pos = bot.group.position;
-
-    // Channelling: stand still until the spike changes state.
-    if (bot.state === 'plant') {
-      if (!ctx.bomb || ctx.bomb.status !== 'carried' || !bot.isCarrier) {
-        bot.state = 'hold';
-      }
-      return;
+  // Progress: only a shrinking distance to the node resets the timer, so
+  // a healthy long edge is never skipped merely for taking a while.
+  if (distance < brain.bestDistance - PROGRESS_STEP) {
+    brain.bestDistance = distance;
+    brain.nodeStuckT = 0;
+  } else {
+    brain.nodeStuckT += dt;
+  }
+  if (brain.nodeStuckT > NODE_TIMEOUT) {
+    // No progress for too long: skip the node and clear any sidestep.
+    bot.pathIndex += 1;
+    brain.nodeIdx = -1;
+    brain.stillT = 0;
+    brain.sideT = 0;
+    return bot.pathIndex >= bot.path.length;
+  }
+  const angle = yawToward(p.x, p.z, node[0], node[1]);
+  turnBot(bot, angle, dt);
+  if (brain.sideT > 0) {
+    brain.sideT -= dt;
+    const sx = -Math.cos(angle) * brain.sideDir * WALK_SPEED * dt;
+    const sz = Math.sin(angle) * brain.sideDir * WALK_SPEED * dt;
+    if (ctx.blocked && ctx.blocked(p.x + sx, p.z + sz)) brain.sideDir *= -1;
+    else {
+      p.x += sx;
+      p.z += sz;
     }
-    if (bot.state === 'defuse') {
-      if (!ctx.bomb || ctx.bomb.status !== 'planted') {
-        bot.state = 'hold';
-      }
-      return;
-    }
-
-    // The carrier plants the moment it stands inside a site.
-    if (bot.isCarrier && ctx.bomb && ctx.bomb.status === 'carried') {
-      if (tryPlant(bot, ctx)) return;
-    }
-    // A defender with a planted spike walks to the plant spot.
-    if (bot.role === 'defend' && ctx.bomb && ctx.bomb.status === 'planted') {
-      if (tryDefuse(bot, ctx)) return;
-      if (bot.state === 'hold') {
-        walkToPlant(bot, ctx);
-      }
-    }
-
-    if (bot.state === 'advance' || bot.state === 'rotate') {
-      const result = walkTo(bot, dt, ctx, brain);
-      if (result === 'arrived') {
-        if (bot.afterMid) {
-          const next = bot.afterMid;
-          bot.afterMid = null;
-          setPath(bot, next);
-        } else {
-          bot.state = 'hold';
-          if (bot.holdNode) {
-            const hold = nodePos(world, bot.holdNode);
-            if (hold) {
-              bot.yaw = turnToward(bot.yaw, bot.holdYaw != null ? bot.holdYaw : bot.yaw, TURN_RATE * dt);
-              bot.group.rotation.y = bot.yaw;
-            }
-          }
-          if (bot.isCarrier && ctx.bomb && ctx.bomb.status === 'carried') {
-            if (!tryPlant(bot, ctx)) walkToPlant(bot, ctx);
-          }
-        }
-      }
-      engage(bot, dt, ctx, brain);
-      return;
-    }
-
-    // Hold: face the assigned angle (swaying slowly, turning toward fresh
-    // gunfire), and shoot anything that shows itself.
-    listenForNoise(bot, ctx, brain);
-    brain.swayPhase += dt * 0.5;
-    let faceYaw = bot.holdYaw != null ? bot.holdYaw : bot.yaw;
-    if (ctx.time < brain.noiseUntil) {
-      faceYaw = brain.noiseYaw;
+  } else {
+    translate(bot, dx / distance * WALK_SPEED * dt, dz / distance * WALK_SPEED * dt, ctx);
+    // Stillness: accumulated displacement from the anchor.
+    if (Math.hypot(p.x - brain.lastX, p.z - brain.lastZ) < STILL_STEP) {
+      brain.stillT += dt;
     } else {
-      faceYaw += Math.sin(brain.swayPhase) * HOLD_SWAY;
+      brain.stillT = 0;
+      brain.lastX = p.x;
+      brain.lastZ = p.z;
     }
-    if (!brain.target) {
-      bot.yaw = turnToward(bot.yaw, faceYaw, TURN_RATE * dt);
-      bot.group.rotation.y = bot.yaw;
+    if (brain.stillT > STILL_SIDESTEP_AFTER) {
+      brain.stillT = 0;
+      brain.sideT = SIDESTEP_TIME;
+      brain.sideDir *= -1;
+      brain.repaths += 1;
+      if (brain.repaths % 3 === 0) setPath(bot, bot.path[bot.path.length - 1]);
     }
-    engage(bot, dt, ctx, brain);
-    // A carrier that ends up holding inside a site plants from the hold.
-    if (bot.isCarrier && ctx.bomb && ctx.bomb.status === 'carried') {
-      if (!tryPlant(bot, ctx)) {
-        const site = world.sites[bot.site];
-        if (site) {
-          scratch.set(pos.x, pos.y + 0.5, pos.z);
-          if (!site.zone.containsPoint(scratch)) walkToPlant(bot, ctx);
+  }
+  return false;
+}
+
+function stepBot(bot, dt, ctx) {
+  if (!bot.alive) return;
+  const brain = brainOf(bot);
+  // Channels: a lost channel drops the bot back to hold; the plant or
+  // defuse is re-attempted on the next tick, never wedged in place.
+  if (bot.state === 'plant') {
+    const bomb = ctx.bomb;
+    if (!bomb || bomb.status !== 'carried' || !bot.isCarrier || (ctx.plantActive && !ctx.plantActive(bot))) bot.state = 'hold';
+    return;
+  }
+  if (bot.state === 'defuse') {
+    const bomb = ctx.bomb;
+    if (!bomb || bomb.status !== 'planted' || (ctx.defuseActive && !ctx.defuseActive(bot))) bot.state = 'hold';
+    return;
+  }
+  const bomb = ctx.bomb;
+  if (tryPlant(bot, ctx)) return;
+  if (bot.role === 'defend' && bomb && bomb.status === 'planted') {
+    const p = bot.group.position;
+    if (bomb.plantPos && Math.hypot(p.x - bomb.plantPos.x, p.z - bomb.plantPos.z) <= DEFUSE_REACH && ctx.defuseStart(bot)) {
+      bot.state = 'defuse';
+      return;
+    }
+    if (bot.state === 'hold') {
+      setPath(bot, plantNodeFor(bomb.site));
+      bot.state = 'advance';
+    }
+  }
+  if (bot.state === 'advance' || bot.state === 'rotate') {
+    if (walkPath(bot, dt, ctx, brain)) {
+      if (bot.afterMid) {
+        const goal = bot.afterMid;
+        bot.afterMid = null;
+        setPath(bot, goal);
+      } else {
+        bot.state = 'hold';
+        if (bot.holdNode && world.waypoints.nodes[bot.holdNode]) {
+          turnBot(bot, bot.holdYaw !== undefined && bot.holdYaw !== null ? bot.holdYaw : bot.yaw, dt);
         }
-      }
-    }
-    // Hold timer: a timed hold repositions to a nearby angle instead of
-    // camping one spot for the whole round.
-    if (bot.holdTimer != null) {
-      bot.holdTimer -= dt;
-      if (bot.holdTimer <= 0) {
-        bot.holdTimer = 60;
-        const here = nearestNodeId(world, pos.x, pos.z);
-        const options = (world.waypoints.adjacency[here] || []).filter((id) => id !== bot.holdNode);
-        if (options.length) {
-          const pick = options[Math.floor(Math.random() * options.length)];
-          bot.holdNode = pick;
-          bot.holdYaw = Math.random() * Math.PI * 2;
-          setPath(bot, pick);
+        if (bot.isCarrier && bomb && bomb.status === 'carried' && !tryPlant(bot, ctx)) {
+          setPath(bot, plantNodeFor(bot.site));
           bot.state = 'advance';
         }
       }
     }
+    combatStep(bot, dt, ctx, brain);
+    return;
   }
+  // Holding: listen, face the hold angle (or a fresh noise) with a sway,
+  // and work the objective when the round is live.
+  listenForNoise(bot, ctx, brain);
+  brain.swayPhase += dt * SWAY_RATE;
+  if (!brain.target) {
+    const facing = ctx.time < brain.noiseUntil
+      ? brain.noiseYaw
+      : (bot.holdYaw !== undefined && bot.holdYaw !== null ? bot.holdYaw : bot.yaw) + Math.sin(brain.swayPhase) * SWAY_AMP;
+    turnBot(bot, facing, dt);
+  }
+  combatStep(bot, dt, ctx, brain);
+  if (bot.isCarrier && bomb && bomb.status === 'carried') {
+    if (tryPlant(bot, ctx)) return;
+    const zone = world.sites[bot.site] ? world.sites[bot.site].zone : null;
+    const p = bot.group.position;
+    if (zone && !zone.containsPoint(tmpV.set(p.x, p.y + SITE_PROBE_H, p.z))) {
+      setPath(bot, plantNodeFor(bot.site));
+      bot.state = 'advance';
+    }
+  }
+  if (bot.holdTimer !== undefined && bot.holdTimer !== null) {
+    bot.holdTimer -= dt;
+    if (bot.holdTimer <= 0) {
+      bot.holdTimer = 60;
+      const neighbors = (world.waypoints.adjacency[nearestNodeId(bot)] || []).filter((id) => id !== bot.holdNode);
+      if (neighbors.length) {
+        const goal = neighbors[Math.floor(Math.random() * neighbors.length)];
+        bot.holdNode = goal;
+        bot.holdYaw = Math.random() * Math.PI * 2;
+        setPath(bot, goal);
+        bot.state = 'advance';
+      }
+    }
+  }
+}
 
-  return {
-    setPath,
-    stepBot,
-  };
+export function createBotAI(worldArg) {
+  world = worldArg;
+  return { stepBot, setPath };
 }

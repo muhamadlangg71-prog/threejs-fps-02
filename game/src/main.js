@@ -76,7 +76,7 @@ const KICK_BASE = 0.009;
 const KICK_NORM = 0.013;
 const KICK_SPREAD = 0.004;
 
-// ---- HUD and footsteps ----
+// ---- HUD / movement ----
 const STEP_GAP = 0.42;
 const STEP_MIN_SPEED = 1;
 const CROSS_REST = 4;
@@ -85,6 +85,7 @@ const CROSS_CAP = 34;
 const MARK_MS = 90;
 const MARK_SHOT_MS = 4000;
 
+// ---- Capture mode (?shot=...&seed=...) ----
 const query = new URLSearchParams(window.location.search);
 const shotName = query.get('shot');
 const seedValue = Number.parseInt(query.get('seed') ?? '1', 10) || 1;
@@ -101,6 +102,7 @@ function seededRandom(initialSeed) {
 }
 const random = seededRandom(seedValue);
 
+// ---- Renderer, scene, camera ----
 const renderer = new THREE.WebGLRenderer({ antialias: true, powerPreference: 'high-performance' });
 renderer.setPixelRatio(Math.min(window.devicePixelRatio, PIXEL_CAP));
 renderer.setSize(window.innerWidth, window.innerHeight);
@@ -109,13 +111,13 @@ renderer.shadowMap.type = THREE.PCFShadowMap;
 renderer.toneMapping = THREE.ACESFilmicToneMapping;
 renderer.toneMappingExposure = EXPOSURE;
 document.getElementById('game').appendChild(renderer.domElement);
-
 const scene = new THREE.Scene();
 scene.background = new THREE.Color(PALETTE.canvas);
 scene.fog = new THREE.Fog(new THREE.Color('#232a38'), FOG_START, FOG_END);
 const camera = new THREE.PerspectiveCamera(VIEW_FOV, window.innerWidth / window.innerHeight, VIEW_NEAR, VIEW_FAR);
 scene.add(camera);
 
+// ---- Modules ----
 const world = createWorld(scene);
 const audio = createAudio();
 const effects = createEffects(scene, camera);
@@ -381,6 +383,10 @@ function listFoes(bot) {
 
 // What botAI sees: time, phase, noise, bomb, and the combat primitives.
 // Every combat call funnels through the phase gates above.
+//
+// Channel starts go through a guard here: a channel already owned by a
+// live bot is never stolen, and a channel whose owner died is cancelled
+// first so a successor can take it over instead of waiting forever.
 const botCtx = {
   get time() {
     return clock;
@@ -405,10 +411,30 @@ const botCtx = {
     fireBotShot(bot, target, err, def);
   },
   plantStart(bot) {
-    game.tryPlant(bot);
+    const channel = game.state && game.state.plant;
+    if (channel && channel.active && channel.who) {
+      if (channel.who === bot) return true;
+      if (channel.who.alive === false) {
+        if (game.cancelChannel) game.cancelChannel(channel.who);
+      } else return false;
+    }
+    return game.tryPlant(bot);
+  },
+  plantActive(bot) {
+    return game.state.plant.active && game.state.plant.who === bot;
   },
   defuseStart(bot) {
-    game.tryDefuse(bot);
+    const channel = game.state && game.state.defuse;
+    if (channel && channel.active && channel.who) {
+      if (channel.who === bot) return true;
+      if (channel.who.alive === false) {
+        if (game.cancelChannel) game.cancelChannel(channel.who);
+      } else return false;
+    }
+    return game.tryDefuse(bot);
+  },
+  defuseActive(bot) {
+    return game.state.defuse.active && game.state.defuse.who === bot;
   },
 };
 
@@ -503,6 +529,8 @@ function tick(dt) {
   // Bots think and move.
   for (const bot of botsApi.bots) {
     if (!bot.alive && bot.state !== 'dead') continue;
+    if (bot.state === 'plant' && !botCtx.plantActive(bot)) bot.state = 'hold';
+    if (bot.state === 'defuse' && !botCtx.defuseActive(bot)) bot.state = 'hold';
     botAI.stepBot(bot, dt, botCtx);
     if (bot.state === 'plant') game.plantTick(dt, bot);
     if (bot.state === 'defuse') game.defuseTick(dt, bot);
