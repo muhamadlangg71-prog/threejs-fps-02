@@ -8,7 +8,7 @@ import { PALETTE } from './palette.js';
 
 // ---------- canvas textures ----------
 
-function paintCanvas(size, painter, repeat) {
+function makeCanvasTex(size, painter, repeat) {
   const canvas = document.createElement('canvas');
   Object.assign(canvas, { width: size, height: size });
   painter(canvas.getContext('2d'), size);
@@ -20,14 +20,14 @@ function paintCanvas(size, painter, repeat) {
   return tex;
 }
 
-function speckle(g, s, count, colorFor, widthFor, heightFor) {
+function sprinkle(g, s, count, colorFor, widthFor, heightFor) {
   for (let i = 0; i < count; i += 1) {
     g.fillStyle = colorFor();
     g.fillRect(Math.random() * s, Math.random() * s, widthFor(), heightFor());
   }
 }
 
-function jaggedLines(g, s, count, segments, step) {
+function cracks(g, s, count, segments, step) {
   g.strokeStyle = 'rgba(20, 18, 16, 0.5)';
   g.lineWidth = 1;
   for (let i = 0; i < count; i += 1) {
@@ -44,7 +44,7 @@ function jaggedLines(g, s, count, segments, step) {
   }
 }
 
-function blotches(g, s, count) {
+function stains(g, s, count) {
   g.fillStyle = 'rgba(30, 26, 22, 0.35)';
   for (let i = 0; i < count; i += 1) {
     g.beginPath();
@@ -53,18 +53,18 @@ function blotches(g, s, count) {
   }
 }
 
-function concretePaint(g, s) {
+function concreteTex(g, s) {
   g.fillStyle = '#4a4640';
   g.fillRect(0, 0, s, s);
-  speckle(g, s, 2600, () => {
+  sprinkle(g, s, 2600, () => {
     const v = 60 + Math.random() * 40;
     return `rgba(${v}, ${v - 4}, ${v - 10}, 0.25)`;
   }, () => 1 + Math.random() * 2, () => 1 + Math.random() * 2);
-  jaggedLines(g, s, 7, 4, 70);
-  blotches(g, s, 12);
+  cracks(g, s, 7, 4, 70);
+  stains(g, s, 12);
 }
 
-function hazardPaint(g, s) {
+function hazardTex(g, s) {
   g.fillStyle = '#f0a830';
   g.fillRect(0, 0, s, s);
   g.fillStyle = '#181d26';
@@ -79,7 +79,7 @@ function hazardPaint(g, s) {
   }
 }
 
-function containerPaint(base) {
+function containerTex(base) {
   return (g, s) => {
     g.fillStyle = base;
     g.fillRect(0, 0, s, s);
@@ -89,14 +89,14 @@ function containerPaint(base) {
       g.fillStyle = 'rgba(255,255,255,0.07)';
       g.fillRect(x + 8, 0, 4, s);
     }
-    speckle(g, s, 300,
+    sprinkle(g, s, 300,
       () => `rgba(20,14,10,${0.05 + Math.random() * 0.2})`,
       () => 2 + Math.random() * 6,
       () => 2 + Math.random() * 4);
   };
 }
 
-function skyPaint() {
+function skyTex() {
   const canvas = document.createElement('canvas');
   Object.assign(canvas, { width: 16, height: 256 });
   const g = canvas.getContext('2d');
@@ -110,7 +110,7 @@ function skyPaint() {
 
 // ---------- materials ----------
 
-function makeMaterials(tex) {
+function buildMaterials(tex) {
   const std = (opts) => new THREE.MeshStandardMaterial(opts);
   return {
     ground: std({ map: tex.concrete, roughness: 0.95, metalness: 0.02 }),
@@ -130,7 +130,7 @@ function makeMaterials(tex) {
 // ---------- the map as data ----------
 // Rows: ['box', w, h, d, x, y, z, material, solid?] or ['cyl', r, h, x, y, z, material].
 // Order is load-bearing: it is the order colliders are tested in, so keep it.
-const LAYOUT = [
+const MAP_ROWS = [
   // Ground slab and the four perimeter walls (48 x 40 m yard, 5 m high).
   ['box', 49, 0.4, 41, 0, -0.2, 0, 'ground'],
   ['box', 0.6, 5, 41, -24.3, 2.5, 0, 'wall'],
@@ -160,7 +160,7 @@ const LAYOUT = [
   ['box', 2.4, 2.4, 6, -3.6, 1.2, 2, 'contA'],
   ['box', 2.4, 2.4, 6, 3.6, 1.2, 2, 'contB'],
   ['box', 2.4, 2.4, 2.4, -3.6, 3.6, 2, 'contB'],
-  ['box', 1.4, 3.4, 1.4, 0, 1.7, -4, 'steel'],
+  ['box', 1.4, 3.4, 1.4, 2.5, 1.7, -4, 'steel'],
   ['box', 3.2, 1.1, 1.4, -7, 0.55, 6, 'wood'],
   ['box', 3.2, 1.1, 1.4, 7, 0.55, 6, 'wood'],
   ['box', 1.4, 1.1, 1.4, -7, 0.55, -6, 'wood'],
@@ -183,17 +183,19 @@ const LAYOUT = [
 ];
 
 // Lamp posts: warm light at both sites, mid, and both longs.
-const LAMP_SPOTS = [[-15, -8.5], [15, -8.5], [0, 6], [-19, 10], [19, 10]];
+// The mid lamp sits at x=2.5, off the midLow -> midDoor waypoint line (x=0),
+// so bots walking the lane never wedge against it.
+const LAMP_POINTS = [[-15, -8.5], [15, -8.5], [2.5, 6], [-19, 10], [19, 10]];
 
 // Distant skyline blocks outside the walls, for depth: [x, height, z, w, d].
-const SKYLINE = [
+const SKYLINE_BLOCKS = [
   [-40, 6, -34, 8, 12], [-28, 9, -38, 10, 18], [-12, 5, -40, 7, 10],
   [6, 11, -38, 9, 22], [22, 7, -36, 8, 14], [38, 10, -30, 10, 20],
   [-44, 8, 10, 8, 16], [44, 6, 14, 8, 12], [-38, 5, 34, 8, 10], [36, 8, 36, 9, 16],
 ];
 
 // Waypoint graph for the bots: [id, x, z] nodes, [a, b] links between neighbours.
-const NODE_LIST = [
+const WAYPOINTS = [
   ['vSpawn', 0, 17], ['vMid', 0, 12], ['vWest', -8, 13], ['vEast', 8, 13],
   ['midLow', 0, 6], ['midDoor', 0, -1], ['midTop', 0, -8],
   ['aLong1', -19, 10], ['aLong2', -19, 0], ['aLong3', -19, -8], ['aEntry', -14, -9],
@@ -203,7 +205,7 @@ const NODE_LIST = [
   ['bSite', 15, -12], ['bPlant', 15, -12], ['bHold1', 20, -15], ['bHold2', 9, -15], ['bBack', 15, -17],
   ['sSpawn', 0, -17], ['sMid', 0, -13],
 ];
-const EDGE_LIST = [
+const LINKS = [
   ['vSpawn', 'vMid'], ['vSpawn', 'vWest'], ['vSpawn', 'vEast'],
   ['vMid', 'midLow'], ['vWest', 'aLong1'], ['vEast', 'bLong1'],
   ['midLow', 'midDoor'], ['midLow', 'aLong2'], ['midLow', 'bLong2'],
@@ -217,28 +219,28 @@ const EDGE_LIST = [
   ['sMid', 'aHold2'], ['sMid', 'bHold2'], ['sMid', 'sSpawn'],
   ['aHold1', 'aBack'], ['bHold1', 'bBack'],
 ];
-const NODES = {};
-for (const [id, x, z] of NODE_LIST) NODES[id] = [x, z];
-const ADJACENCY = {};
-for (const id of Object.keys(NODES)) ADJACENCY[id] = [];
-for (const [a, b] of EDGE_LIST) {
-  ADJACENCY[a].push(b);
-  ADJACENCY[b].push(a);
+const NODE_POS = {};
+for (const [id, x, z] of WAYPOINTS) NODE_POS[id] = [x, z];
+const NEIGHBORS = {};
+for (const id of Object.keys(NODE_POS)) NEIGHBORS[id] = [];
+for (const [a, b] of LINKS) {
+  NEIGHBORS[a].push(b);
+  NEIGHBORS[b].push(a);
 }
 
 // Site zones and plant spots.
-function zoneBox(x0, z0, x1, z1) {
+function makeZone(x0, z0, x1, z1) {
   return new THREE.Box3(new THREE.Vector3(x0, 0, z0), new THREE.Vector3(x1, 4, z1));
 }
-const SITES = {
-  A: { name: 'Crane Deck', zone: zoneBox(-20, -16, -10, -8), plant: new THREE.Vector3(-15, 0.8, -12) },
-  B: { name: 'Depot', zone: zoneBox(10, -16, 20, -8), plant: new THREE.Vector3(15, 0, -12) },
+const SITE_DEFS = {
+  A: { name: 'Crane Deck', zone: makeZone(-20, -16, -10, -8), plant: new THREE.Vector3(-15, 0.8, -12) },
+  B: { name: 'Depot', zone: makeZone(10, -16, 20, -8), plant: new THREE.Vector3(15, 0, -12) },
 };
-const SPAWN_POINTS = {
+const SPAWN_SPOTS = {
   vanguard: [[-4, 17.5], [-2, 18.5], [0, 17], [2, 18.5], [4, 17.5]],
   sentinel: [[-4, -17.5], [-2, -18.5], [0, -17], [2, -18.5], [4, -17.5]],
 };
-function spawnList(points) {
+function spawnVectors(points) {
   return points.map(([x, z]) => new THREE.Vector3(x, 0, z));
 }
 
@@ -247,18 +249,18 @@ export function createWorld(scene) {
   scene.add(group);
 
   const tex = {
-    concrete: paintCanvas(256, concretePaint, 8),
-    hazard: paintCanvas(128, hazardPaint),
-    contA: paintCanvas(256, containerPaint('#3a4a52')),
-    contB: paintCanvas(256, containerPaint('#5c4632')),
-    contC: paintCanvas(256, containerPaint('#6b4a2a')),
+    concrete: makeCanvasTex(256, concreteTex, 8),
+    hazard: makeCanvasTex(128, hazardTex),
+    contA: makeCanvasTex(256, containerTex('#3a4a52')),
+    contB: makeCanvasTex(256, containerTex('#5c4632')),
+    contC: makeCanvasTex(256, containerTex('#6b4a2a')),
   };
-  const mats = makeMaterials(tex);
+  const mats = buildMaterials(tex);
 
   const colliders = [];
   const shootables = [];
 
-  function placeSolid(mesh, solid) {
+  function addSolid(mesh, solid) {
     mesh.castShadow = true;
     mesh.receiveShadow = true;
     group.add(mesh);
@@ -268,26 +270,26 @@ export function createWorld(scene) {
     }
     return mesh;
   }
-  function addBox(row) {
+  function buildBox(row) {
     const [, w, h, d, x, y, z, mat, solid] = row;
     const mesh = new THREE.Mesh(new THREE.BoxGeometry(w, h, d), mats[mat]);
     mesh.position.set(x, y, z);
-    return placeSolid(mesh, solid);
+    return addSolid(mesh, solid);
   }
-  function addPost(row) {
+  function buildPost(row) {
     const [, r, h, x, y, z, mat] = row;
     const mesh = new THREE.Mesh(new THREE.CylinderGeometry(r, r, h, 14), mats[mat]);
     mesh.position.set(x, y, z);
-    return placeSolid(mesh, true);
+    return addSolid(mesh, true);
   }
-  for (const row of LAYOUT) {
-    if (row[0] === 'box') addBox(row);
-    else addPost(row);
+  for (const row of MAP_ROWS) {
+    if (row[0] === 'box') buildBox(row);
+    else buildPost(row);
   }
 
   // Lamp posts with warm light.
-  for (const [lx, lz] of LAMP_SPOTS) {
-    addBox(['box', 0.18, 4.2, 0.18, lx, 2.1, lz, 'dark']);
+  for (const [lx, lz] of LAMP_POINTS) {
+    buildBox(['box', 0.18, 4.2, 0.18, lx, 2.1, lz, 'dark']);
     const head = new THREE.Mesh(new THREE.BoxGeometry(0.5, 0.18, 0.5), mats.lamp);
     head.position.set(lx, 4.25, lz);
     group.add(head);
@@ -299,7 +301,7 @@ export function createWorld(scene) {
   // Distant skyline silhouettes outside the walls.
   const skyline = new THREE.Group();
   const silMat = new THREE.MeshBasicMaterial({ color: new THREE.Color('#12151c'), fog: false });
-  for (const [sx, sh, sz, sw, sd] of SKYLINE) {
+  for (const [sx, sh, sz, sw, sd] of SKYLINE_BLOCKS) {
     const block = new THREE.Mesh(new THREE.BoxGeometry(sw, sh, sd), silMat);
     block.position.set(sx, sh / 2 - 0.2, sz);
     skyline.add(block);
@@ -309,7 +311,7 @@ export function createWorld(scene) {
   // Sky dome: vertical dusk gradient, with the sun low in the west.
   const sky = new THREE.Mesh(
     new THREE.SphereGeometry(130, 24, 16),
-    new THREE.MeshBasicMaterial({ map: skyPaint(), side: THREE.BackSide, fog: false }),
+    new THREE.MeshBasicMaterial({ map: skyTex(), side: THREE.BackSide, fog: false }),
   );
   scene.add(sky);
   const sunCanvas = document.createElement('canvas');
@@ -348,8 +350,8 @@ export function createWorld(scene) {
     colliders,
     shootables,
     group,
-    sites: SITES,
-    spawns: { vanguard: spawnList(SPAWN_POINTS.vanguard), sentinel: spawnList(SPAWN_POINTS.sentinel) },
-    waypoints: { nodes: NODES, edges: EDGE_LIST, adjacency: ADJACENCY },
+    sites: SITE_DEFS,
+    spawns: { vanguard: spawnVectors(SPAWN_SPOTS.vanguard), sentinel: spawnVectors(SPAWN_SPOTS.sentinel) },
+    waypoints: { nodes: NODE_POS, edges: LINKS, adjacency: NEIGHBORS },
   };
 }
