@@ -1,207 +1,227 @@
-// Hit feedback: tracers, impact sparks, blood puffs, explosions. Every effect is a
-// pooled object reused across frames — the hot loop never allocates a mesh.
+// FERROLINE effects: gunfire tracers, blood, impact sparks, smoke and
+// explosions. Nothing is created while the game runs: every mesh and sprite
+// is pooled up front and handed back when its life runs out, so the busiest
+// second of a 5v5 firefight costs no allocation and no collection hitch.
 import * as THREE from 'three';
-import { PALETTE } from './palette.js';
 
-const POOL_SIZES = { tracer: 24, spark: 40, smoke: 16 };
-const TRACER_LIFE = 0.12;
-const TRACER_OPACITY = 0.85;
-const SPARK_OPACITY = 0.95;
+// Pool sizes: enough for the busiest second of a 5v5 firefight.
+const TRACER_COUNT = 32;
+const SPARK_COUNT = 256;
+const PUFF_COUNT = 48;
+const FLASH_COUNT = 4;
 
-function makePool(count, build) {
-  const items = [];
-  for (let i = 0; i < count; i += 1) items.push(build());
-  let cursor = 0;
-  return {
-    items,
-    next() {
-      const item = items[cursor];
-      cursor = (cursor + 1) % count;
-      return item;
-    },
-  };
-}
+// How long each kind of effect lives, in seconds.
+const TRACER_SPAN = 0.07;
+const BLOOD_SPAN = 0.45;
+const SPARK_SPAN = 0.22;
+const PUFF_SPAN = 2.6;
+const FLASH_SPAN = 0.35;
 
-function smokeTexture() {
+// Looks: a warm tracer, dark blood, pale sparks, grey smoke, orange fire.
+const TRACER_COLOR = 0xffd27a;
+const BLOOD_COLOR = 0x8a1414;
+const SPARK_COLOR = 0xffe9a8;
+const PUFF_COLOR = 0x9aa0a8;
+const FLASH_COLOR = 0xff9a3c;
+const SPARK_FALL = 9;
+const BLOOD_SPEED = 2.2;
+const SPARK_SPEED = 5;
+const BLAST_SPEED = 7;
+
+// A soft round disc, painted once, shared by every smoke puff.
+function softDisc() {
   const canvas = document.createElement('canvas');
-  Object.assign(canvas, { width: 64, height: 64 });
+  canvas.width = 64;
+  canvas.height = 64;
   const g = canvas.getContext('2d');
-  const radial = g.createRadialGradient(32, 32, 2, 32, 32, 32);
-  radial.addColorStop(0, 'rgba(200, 190, 175, 0.7)');
-  radial.addColorStop(1, 'rgba(200, 190, 175, 0)');
-  g.fillStyle = radial;
+  const grad = g.createRadialGradient(32, 32, 2, 32, 32, 30);
+  grad.addColorStop(0, 'rgba(255,255,255,1)');
+  grad.addColorStop(0.6, 'rgba(255,255,255,0.45)');
+  grad.addColorStop(1, 'rgba(255,255,255,0)');
+  g.fillStyle = grad;
   g.fillRect(0, 0, 64, 64);
   return new THREE.CanvasTexture(canvas);
 }
 
 export function createEffects(scene, camera) {
-  const tracerMat = new THREE.MeshBasicMaterial({
-    color: new THREE.Color(PALETTE.accent), transparent: true, opacity: TRACER_OPACITY, depthWrite: false,
-  });
-  const tracers = makePool(POOL_SIZES.tracer, () => {
-    const mesh = new THREE.Mesh(new THREE.BoxGeometry(0.035, 0.035, 1), tracerMat.clone());
-    mesh.visible = false;
-    scene.add(mesh);
-    return { mesh, life: 0 };
-  });
-
-  const sparkGeo = new THREE.TetrahedronGeometry(0.06);
-  const sparks = makePool(POOL_SIZES.spark, () => {
-    const mat = new THREE.MeshBasicMaterial({ color: new THREE.Color(PALETTE.accent), transparent: true, opacity: 0.9 });
-    const mesh = new THREE.Mesh(sparkGeo, mat);
-    mesh.visible = false;
-    scene.add(mesh);
-    return { mesh, vel: new THREE.Vector3(), life: 0, gravity: 9 };
-  });
-
-  const smokeTex = smokeTexture();
-  const smokes = makePool(POOL_SIZES.smoke, () => {
-    const mat = new THREE.SpriteMaterial({ map: smokeTex, transparent: true, opacity: 0, depthWrite: false });
-    const sprite = new THREE.Sprite(mat);
-    sprite.visible = false;
-    scene.add(sprite);
-    return { sprite, life: 0, maxLife: 1, grow: 1 };
-  });
-
-  // Explosion flash: a point light plus a bright sphere that pops and fades.
-  const boomLight = new THREE.PointLight(new THREE.Color('#ffb066'), 0, 22, 1.6);
-  scene.add(boomLight);
-  const boomMesh = new THREE.Mesh(
-    new THREE.SphereGeometry(1, 16, 12),
-    new THREE.MeshBasicMaterial({ color: new THREE.Color('#ffcf8a'), transparent: true, opacity: 0, depthWrite: false }),
-  );
-  boomMesh.visible = false;
-  scene.add(boomMesh);
-  let boomLife = 0;
-
+  const disc = softDisc();
   const tmpA = new THREE.Vector3();
   const tmpB = new THREE.Vector3();
 
-  function spawnSpark(point, normal, color, speed, count, gravity) {
+  // ---- Tracers: thin glowing bars stretched muzzle to hit. ----
+  const tracerGeo = new THREE.BoxGeometry(1, 1, 1);
+  const tracers = [];
+  for (let i = 0; i < TRACER_COUNT; i += 1) {
+    const mat = new THREE.MeshBasicMaterial({
+      color: TRACER_COLOR, transparent: true, opacity: 0,
+      blending: THREE.AdditiveBlending, depthWrite: false,
+    });
+    const mesh = new THREE.Mesh(tracerGeo, mat);
+    mesh.visible = false;
+    scene.add(mesh);
+    tracers.push({ mesh, age: 0 });
+  }
+  let tracerNext = 0;
+
+  // ---- Sparks: one shared pool for blood, impacts and blast debris. ----
+  // Blood and sparks share geometry; colour is the only difference, and a
+  // spark shrinks away instead of fading, so two materials cover the pool.
+  const sparkGeo = new THREE.BoxGeometry(0.06, 0.06, 0.06);
+  const bloodMat = new THREE.MeshBasicMaterial({ color: BLOOD_COLOR });
+  const sparkMat = new THREE.MeshBasicMaterial({ color: SPARK_COLOR });
+  const sparks = [];
+  for (let i = 0; i < SPARK_COUNT; i += 1) {
+    const mesh = new THREE.Mesh(sparkGeo, sparkMat);
+    mesh.visible = false;
+    scene.add(mesh);
+    sparks.push({ mesh, vel: new THREE.Vector3(), age: 0, span: SPARK_SPAN });
+  }
+  let sparkNext = 0;
+
+  function burst(point, normal, count, speed, span, bloody) {
     for (let n = 0; n < count; n += 1) {
-      const s = sparks.next();
-      s.mesh.visible = true;
+      const s = sparks[sparkNext];
+      sparkNext = (sparkNext + 1) % SPARK_COUNT;
       s.mesh.position.copy(point);
-      s.mesh.material.color.set(color);
-      s.mesh.material.opacity = SPARK_OPACITY;
-      tmpA.copy(normal).multiplyScalar(speed * (0.5 + Math.random() * 0.8));
-      tmpB.set((Math.random() - 0.5) * speed, Math.random() * speed * 0.7, (Math.random() - 0.5) * speed);
-      s.vel.copy(tmpA).add(tmpB);
-      s.life = 0.35 + Math.random() * 0.25;
-      s.gravity = gravity;
+      s.mesh.material = bloody ? bloodMat : sparkMat;
+      s.vel.set(Math.random() - 0.5, Math.random() - 0.5, Math.random() - 0.5)
+        .multiplyScalar(speed)
+        .addScaledVector(normal, speed * 0.8);
+      s.age = 0;
+      s.span = span;
+      s.mesh.scale.setScalar(1);
+      s.mesh.visible = true;
     }
   }
 
-  function placeSmoke(point, scale, life) {
-    const s = smokes.next();
-    s.sprite.visible = true;
-    s.sprite.position.copy(point);
-    s.sprite.scale.setScalar(0.4);
-    s.sprite.material.opacity = 0.55;
-    s.life = life;
-    s.maxLife = life;
-    s.grow = scale;
+  // ---- Smoke: billboards that swell and thin out. ----
+  const puffs = [];
+  for (let i = 0; i < PUFF_COUNT; i += 1) {
+    const mat = new THREE.SpriteMaterial({
+      map: disc, color: PUFF_COLOR, transparent: true, opacity: 0, depthWrite: false,
+    });
+    const sprite = new THREE.Sprite(mat);
+    sprite.visible = false;
+    scene.add(sprite);
+    puffs.push({ sprite, age: 0, size: 1, base: 0.5, drift: new THREE.Vector3() });
+  }
+  let puffNext = 0;
+
+  // ---- Blast flashes: a fireball that swells and dies in a blink. ----
+  const flashGeo = new THREE.SphereGeometry(1, 16, 12);
+  const flashes = [];
+  for (let i = 0; i < FLASH_COUNT; i += 1) {
+    const mat = new THREE.MeshBasicMaterial({
+      color: FLASH_COLOR, transparent: true, opacity: 0,
+      blending: THREE.AdditiveBlending, depthWrite: false,
+    });
+    const mesh = new THREE.Mesh(flashGeo, mat);
+    mesh.visible = false;
+    scene.add(mesh);
+    flashes.push({ mesh, age: 0 });
+  }
+  let flashNext = 0;
+
+  function showTracer(from, to) {
+    const len = from.distanceTo(to);
+    if (len < 0.1) return;
+    const t = tracers[tracerNext];
+    tracerNext = (tracerNext + 1) % TRACER_COUNT;
+    tmpA.copy(from).add(to).multiplyScalar(0.5);
+    t.mesh.position.copy(tmpA);
+    t.mesh.lookAt(to);
+    t.mesh.scale.set(0.02, 0.02, len);
+    t.mesh.material.opacity = 0.9;
+    t.mesh.visible = true;
+    t.age = 0;
   }
 
-  function updateTracers(dt) {
-    for (const t of tracers.items) {
+  function showSmoke(at, radius, count) {
+    for (let n = 0; n < count; n += 1) {
+      const p = puffs[puffNext];
+      puffNext = (puffNext + 1) % PUFF_COUNT;
+      tmpA.set(Math.random() - 0.5, Math.random() * 0.4, Math.random() - 0.5)
+        .multiplyScalar(radius);
+      p.sprite.position.copy(at).add(tmpA);
+      p.drift.set(Math.random() - 0.5, 0.3 + Math.random() * 0.4, Math.random() - 0.5);
+      p.size = radius * (0.8 + Math.random() * 0.8);
+      p.base = 0.5;
+      p.age = 0;
+      p.sprite.scale.setScalar(p.size * 0.4);
+      p.sprite.material.opacity = p.base;
+      p.sprite.visible = true;
+    }
+  }
+
+  function showExplosion(at) {
+    const f = flashes[flashNext];
+    flashNext = (flashNext + 1) % FLASH_COUNT;
+    f.mesh.position.copy(at);
+    f.mesh.scale.setScalar(0.5);
+    f.mesh.material.opacity = 0.9;
+    f.mesh.visible = true;
+    f.age = 0;
+    tmpB.set(0, 1, 0);
+    burst(at, tmpB, 12, BLAST_SPEED, SPARK_SPAN * 2, false);
+    showSmoke(at, 3, 5);
+  }
+
+  function advance(dt) {
+    for (const t of tracers) {
       if (!t.mesh.visible) continue;
-      t.life -= dt;
-      if (t.life <= 0) t.mesh.visible = false;
-      else t.mesh.material.opacity = TRACER_OPACITY * (t.life / TRACER_LIFE);
+      t.age += dt;
+      if (t.age >= TRACER_SPAN) {
+        t.mesh.visible = false;
+        continue;
+      }
+      t.mesh.material.opacity = 0.9 * (1 - t.age / TRACER_SPAN);
     }
-  }
-
-  function updateSparks(dt) {
-    for (const s of sparks.items) {
+    for (const s of sparks) {
       if (!s.mesh.visible) continue;
-      s.life -= dt;
-      if (s.life <= 0) {
+      s.age += dt;
+      if (s.age >= s.span) {
         s.mesh.visible = false;
         continue;
       }
-      s.vel.y -= s.gravity * dt;
+      s.vel.y -= SPARK_FALL * dt;
       s.mesh.position.addScaledVector(s.vel, dt);
-      s.mesh.material.opacity = Math.min(SPARK_OPACITY, s.life * 3);
-      s.mesh.rotation.x += dt * 9;
-      s.mesh.rotation.y += dt * 7;
+      s.mesh.scale.setScalar(Math.max(0.01, 1 - s.age / s.span));
     }
-  }
-
-  function updateSmokes(dt) {
-    for (const s of smokes.items) {
-      if (!s.sprite.visible) continue;
-      s.life -= dt;
-      if (s.life <= 0) {
-        s.sprite.visible = false;
+    for (const p of puffs) {
+      if (!p.sprite.visible) continue;
+      p.age += dt;
+      if (p.age >= PUFF_SPAN) {
+        p.sprite.visible = false;
         continue;
       }
-      const k = 1 - s.life / s.maxLife;
-      s.sprite.scale.setScalar(0.4 + k * s.grow);
-      s.sprite.material.opacity = 0.55 * (s.life / s.maxLife);
+      const k = p.age / PUFF_SPAN;
+      p.sprite.position.addScaledVector(p.drift, dt);
+      p.sprite.scale.setScalar(p.size * (0.4 + 0.6 * k));
+      p.sprite.material.opacity = p.base * (1 - k);
     }
-  }
-
-  function updateBoom(dt) {
-    if (boomLife <= 0) return;
-    boomLife -= dt;
-    const k = Math.max(0, boomLife / 0.45);
-    boomLight.intensity = 90 * k;
-    boomMesh.scale.setScalar(0.6 + (1 - k) * 4.5);
-    boomMesh.material.opacity = 0.95 * k;
-    if (boomLife <= 0) {
-      boomMesh.visible = false;
-      boomLight.intensity = 0;
+    for (const f of flashes) {
+      if (!f.mesh.visible) continue;
+      f.age += dt;
+      if (f.age >= FLASH_SPAN) {
+        f.mesh.visible = false;
+        continue;
+      }
+      const k = f.age / FLASH_SPAN;
+      f.mesh.scale.setScalar(0.5 + k * 7);
+      f.mesh.material.opacity = 0.9 * (1 - k);
     }
-  }
-
-  function fireTracer(from, to) {
-    const t = tracers.next();
-    tmpA.copy(to).sub(from);
-    const len = tmpA.length();
-    if (len < 0.1) return;
-    t.mesh.visible = true;
-    t.mesh.position.copy(from).addScaledVector(tmpA, 0.5);
-    t.mesh.scale.set(1, 1, len);
-    t.mesh.lookAt(to);
-    t.mesh.material.opacity = TRACER_OPACITY;
-    t.life = TRACER_LIFE;
   }
 
   return {
-    tracer(from, to) {
-      fireTracer(from, to);
+    tracer: showTracer,
+    blood(point, normal) {
+      burst(point, normal, 10, BLOOD_SPEED, BLOOD_SPAN, true);
     },
     impact(point, normal) {
-      spawnSpark(point, normal, PALETTE.accent, 3.2, 6, 9);
+      burst(point, normal, 7, SPARK_SPEED, SPARK_SPAN, false);
     },
-    blood(point, normal) {
-      spawnSpark(point, normal, '#a02020', 2.2, 8, 7);
-    },
-    smoke(point, scale = 1.6, life = 1.1) {
-      placeSmoke(point, scale, life);
-    },
-    explosion(point) {
-      boomLight.position.copy(point);
-      boomLight.intensity = 90;
-      boomMesh.position.copy(point);
-      boomMesh.visible = true;
-      boomMesh.scale.setScalar(0.6);
-      boomMesh.material.opacity = 0.95;
-      boomLife = 0.45;
-      spawnSpark(point, tmpA.set(0, 1, 0), '#ffcf8a', 7, 14, 10);
-      placeSmoke(point, 4.5, 1.6);
-      placeSmoke(tmpB.copy(point).add(new THREE.Vector3(0, 1.2, 0)), 3, 1.3);
-    },
-    muzzleFlash() {
-      // The weapon's own flash quad handles the look; the light is driven by weapon.step.
-    },
-    step(dt) {
-      updateTracers(dt);
-      updateSparks(dt);
-      updateSmokes(dt);
-      updateBoom(dt);
-      void camera;
-    },
+    smoke: showSmoke,
+    explosion: showExplosion,
+    step: advance,
   };
 }
