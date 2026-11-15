@@ -1,83 +1,85 @@
-// Keyboard and mouse, plus the pointer lock that turns mouse movement into
-// looking. Plain browser APIs only: the game asks the canvas for pointer
-// lock and reads movementX/Y while it holds it. `edge` is the set of keys
-// that went down since the last takePressed() call, so the game can act on a
-// single press (buy, swap weapon, throw) without repeats.
+// FERROLINE input: keyboard, mouse and pointer lock, kept as one small
+// state object the loop reads every frame. Keys held down live in
+// state.keys; keys tapped since the last frame live in the pressed set
+// takePressed hands over (so one tap is one buy, one switch, one throw);
+// mouse movement accumulates in takeLook until the loop spends it.
 export function createInput(canvas, onLockChange) {
-  const held = new Set();
-  const edge = new Set();
-  const pad = { keys: held, pressed: edge, locked: false, firing: false, lookX: 0, lookY: 0 };
+  const state = { keys: new Set(), firing: false };
+  const lookDelta = { x: 0, y: 0 };
+  let pressed = new Set();
 
-  function onKey(event, isDown) {
-    if (isDown) {
-      if (!held.has(event.code)) edge.add(event.code);
-      held.add(event.code);
-    } else {
-      held.delete(event.code);
-    }
-    if (event.code === 'Space') event.preventDefault();
+  function onKeyDown(e) {
+    if (e.repeat) return;
+    if (e.code === 'Space') e.preventDefault();
+    state.keys.add(e.code);
+    pressed.add(e.code);
   }
 
-  function onMouseMove(event) {
-    if (!pad.locked) return;
-    pad.lookX += event.movementX;
-    pad.lookY += event.movementY;
+  function onKeyUp(e) {
+    state.keys.delete(e.code);
   }
 
-  function onMouseDown(event) {
-    if (pad.locked && event.button === 0) pad.firing = true;
+  function onMouseMove(e) {
+    if (document.pointerLockElement !== canvas) return;
+    lookDelta.x += e.movementX || 0;
+    lookDelta.y += e.movementY || 0;
   }
 
-  function onMouseUp(event) {
-    if (event.button === 0) pad.firing = false;
+  function onMouseDown(e) {
+    if (e.button === 0) state.firing = true;
   }
 
-  function onWheel(event) {
-    if (!pad.locked) return;
-    edge.add(event.deltaY > 0 ? 'WheelDown' : 'WheelUp');
+  function onMouseUp(e) {
+    if (e.button === 0) state.firing = false;
   }
 
-  function onBlur() {
-    held.clear();
-    edge.clear();
+  function onWheel(e) {
+    pressed.add(e.deltaY < 0 ? 'WheelUp' : 'WheelDown');
   }
 
   function onLock() {
-    pad.locked = document.pointerLockElement === canvas;
-    if (!pad.locked) {
-      held.clear();
-      pad.firing = false;
-    }
-    onLockChange(pad.locked);
+    onLockChange(document.pointerLockElement === canvas);
   }
 
-  const bindings = [
-    [window, 'keydown', (event) => onKey(event, true)],
-    [window, 'keyup', (event) => onKey(event, false)],
-    [window, 'blur', onBlur],
-    [window, 'mousemove', onMouseMove],
-    [window, 'mousedown', onMouseDown],
-    [window, 'mouseup', onMouseUp],
-    [window, 'wheel', onWheel, { passive: true }],
-    [document, 'pointerlockchange', onLock],
-  ];
-  for (const [target, type, handler, opts] of bindings) target.addEventListener(type, handler, opts);
+  function onBlur() {
+    state.keys.clear();
+    state.firing = false;
+  }
+
+  function onContext(e) {
+    e.preventDefault();
+  }
+
+  document.addEventListener('keydown', onKeyDown);
+  document.addEventListener('keyup', onKeyUp);
+  document.addEventListener('mousemove', onMouseMove);
+  document.addEventListener('mouseup', onMouseUp);
+  canvas.addEventListener('mousedown', onMouseDown);
+  canvas.addEventListener('wheel', onWheel);
+  canvas.addEventListener('contextmenu', onContext);
+  document.addEventListener('pointerlockchange', onLock);
+  window.addEventListener('blur', onBlur);
 
   return {
-    state: pad,
+    state,
     requestLock() {
-      canvas.requestPointerLock();
+      try {
+        const pending = canvas.requestPointerLock();
+        if (pending && typeof pending.catch === 'function') pending.catch(() => {});
+      } catch {
+        // Pointer lock is a nicety: the game plays on without it.
+      }
     },
     takeLook() {
-      const snapshot = { x: pad.lookX, y: pad.lookY };
-      pad.lookX = 0;
-      pad.lookY = 0;
-      return snapshot;
+      const spent = { x: lookDelta.x, y: lookDelta.y };
+      lookDelta.x = 0;
+      lookDelta.y = 0;
+      return spent;
     },
     takePressed() {
-      const snapshot = new Set(edge);
-      edge.clear();
-      return snapshot;
+      const spent = pressed;
+      pressed = new Set();
+      return spent;
     },
   };
 }
