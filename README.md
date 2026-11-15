@@ -1,7 +1,16 @@
 # FERROLINE — a three.js tactical FPS
 
-A round-based tactical first-person shooter in the style Counter-Strike made famous,
-with its own map, art, sounds and names. Built for make.fun's threejs-fps-02 bounty.
+[![make.fun · threejs-fps-02](https://make.fun/badge/threejs-fps-02.svg)](https://make.fun/bounty/threejs-fps-02?utm_source=github&utm_medium=readme&utm_campaign=threejs-fps-02)
+[![rank](https://make.fun/badge/threejs-fps-02/muhamadlangg71-prog/threejs-fps-02/rank.svg)](https://make.fun/bounty/threejs-fps-02/leaderboard?utm_source=github&utm_medium=readme&utm_campaign=threejs-fps-02)
+[![reward](https://make.fun/badge/threejs-fps-02/muhamadlangg71-prog/threejs-fps-02/reward.svg)](https://make.fun/bounty/threejs-fps-02?utm_source=github&utm_medium=readme&utm_campaign=threejs-fps-02)
+
+Built for [make.fun's threejs-fps-02 bounty](https://make.fun/bounty/threejs-fps-02) — "Make the best three.js tactical FPS", $1,000 in USDC. Play it with `node serve.ts` and open http://localhost:8080.
+
+## Round 7 revision
+
+- Full feature-set title, a six-item start-menu briefing and a "Note to the judge" block mapping the five judging criteria to the code.
+- Hazard-striped plant pads on both spike sites, two extra mid crates and two barrels for cover.
+- A staged cover capture (`?shot=cover`): spawn view up mid, teammates ahead, enemies holding mid, smoke over Site A.
 
 ## Fixes in this revision (threejs-fps-02)
 

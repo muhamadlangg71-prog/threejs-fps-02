@@ -5,12 +5,12 @@ from playwright.sync_api import sync_playwright
 
 BASE = "http://localhost:8090"
 SHOTS = [
-    ("1-start.jpg", "?shot=start&seed=1"),
+    ("01-cover.jpg", "?shot=cover&seed=1"),
     ("2-play.jpg", "?shot=play&seed=1"),
     ("3-buy.jpg", "?shot=buy&seed=1"),
     ("4-end.jpg", "?shot=end&seed=1"),
 ]
-OUT = "/home/hatch/workspace/makefun-vm/threejs-fps-01/screenshots"
+OUT = "/home/hatch/workspace/makefun-vm/threejs-fps-02/screenshots"
 
 errors = []
 failed_requests = []
