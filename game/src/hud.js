@@ -19,7 +19,7 @@ const SHOP = [
 ];
 
 const PHASE_TAGS = {
-  menu: 'FERROLINE',
+  menu: 'FERROLINE — 5V5 PLANT / DEFUSE',
   buy: 'BUY PHASE — press B to shop',
   live: 'ROUND LIVE',
   roundEnd: 'ROUND END',
@@ -215,8 +215,8 @@ export function createHud() {
 
   function showOverlay(kind, score) {
     const overlayCopy = {
-      start: ['FERROLINE<span class="tag">.</span>',
-        'A dusk rail yard. Two teams, one spike. Plant it at Crane Deck or the Depot — or stop the plant. First to 7 rounds takes the match.',
+      start: ['FERROLINE<span class="tag"> — 5V5 PLANT / DEFUSE</span>',
+        'Round-based 5v5. Plant the spike at Crane Deck or the Depot — or stop the plant. Buy four guns, armour and a frag grenade with round money, and fight beside team bots that follow routes and hold angles. First to 7 rounds takes the match.',
         'Click to play'],
       paused: ['PAUSED',
         'The match is waiting. Click to jump back in.',

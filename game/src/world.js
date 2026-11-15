@@ -147,6 +147,8 @@ const MAP_ROWS = [
   ['box', 1.2, 1.1, 2.2, -11.5, 1.35, -13.5, 'wood'],
   ['box', 1.2, 1.1, 1.2, -18.5, 1.35, -14.5, 'wood'],
   ['box', 10, 0.06, 0.5, -15, 0.83, -8.6, 'hazard', false],
+  // Hazard-striped plant pad at Site A, where the spike goes down.
+  ['box', 3.2, 0.06, 3.2, -15, 0.87, -8.5, 'hazard', false],
   // Site B — Depot (northeast): rail car on wheels, containers, one stacked.
   ['box', 9, 2.6, 2.6, 15, 1.3, -15.5, 'contC'],
   ['box', 9, 0.5, 2.8, 15, 2.85, -15.5, 'dark'],
@@ -156,6 +158,8 @@ const MAP_ROWS = [
   ['box', 2.4, 2.4, 2.4, 9.5, 1.2, -10.5, 'contB'],
   ['box', 2.4, 1.2, 2.4, 20.5, 3.0, -10, 'contB'],
   ['box', 10, 0.06, 0.5, 15, 0.03, -8.6, 'hazard', false],
+  // Hazard-striped plant pad at Site B, where the spike goes down.
+  ['box', 3.2, 0.06, 3.2, 15, 0.07, -8.5, 'hazard', false],
   // Mid: container wall with a door gap, a steel pillar, low crates.
   ['box', 2.4, 2.4, 6, -3.6, 1.2, 2, 'contA'],
   ['box', 2.4, 2.4, 6, 3.6, 1.2, 2, 'contB'],
@@ -165,6 +169,10 @@ const MAP_ROWS = [
   ['box', 3.2, 1.1, 1.4, 7, 0.55, 6, 'wood'],
   ['box', 1.4, 1.1, 1.4, -7, 0.55, -6, 'wood'],
   ['box', 1.4, 1.1, 1.4, 7, 0.55, -6, 'wood'],
+  // Two extra mid crates for cover: off the x=0 mid lane and clear of the
+  // midLow-to-midA/midB diagonals, so no waypoint lane is blocked.
+  ['box', 1.4, 1.1, 1.4, -4, 0.55, 9, 'wood'],
+  ['box', 1.4, 1.1, 1.4, 4, 0.55, 9, 'wood'],
   // Long lanes: crates, barrels, the overhead pipe run along B-long.
   ['box', 2.2, 1.1, 1.2, -21, 0.55, 4, 'wood'],
   ['box', 1.2, 1.1, 2.2, -21, 0.55, -4, 'wood'],
@@ -174,6 +182,9 @@ const MAP_ROWS = [
   ['cyl', 0.55, 1.1, 22, 0.55, 12, 'rust'],
   ['cyl', 0.55, 1.1, -22, 0.55, -13, 'rust'],
   ['cyl', 0.55, 1.1, 22, 0.55, -13, 'rust'],
+  // Two extra barrels flanking mid, clear of the midLow-to-long lanes.
+  ['cyl', 0.55, 1.1, -12, 0.55, 6, 'rust'],
+  ['cyl', 0.55, 1.1, 12, 0.55, 6, 'rust'],
   ['box', 0.5, 0.5, 22, 22.5, 3.6, 0, 'steel'],
   // Spawn cover, both ends.
   ['box', 2.4, 1.2, 1.2, -4, 0.6, 15, 'wood'],
