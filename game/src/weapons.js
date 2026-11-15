@@ -1,265 +1,340 @@
-// Weapons: the numbers and the view models. The caller owns the ray and the damage;
-// this module owns magazines, fire rates, reloads, spread and recoil per weapon.
-// Four guns plus a grenade: stopping to aim pays, spraying on the move does not.
+// The arsenal: five entries in one table, and a loadout that owns ammo,
+// fire-rate timing and the first-person view model. Every fighter — the
+// player and each bot — carries one loadout; the table is the single source
+// of truth for prices (the buy menu reads it), damage, magazine sizes and
+// handling, so a balance change is one row, not a hunt through the code.
+//
+// The P9 Sidearm is the free sidearm every agent already carries: its
+// listed price is $300 in the shop, but nobody is ever charged for it —
+// the buy menu in main.js and buyFor in bots.js both skip the charge.
+// A fighter's primary is their slot-1 weapon; the pistol is slot 2 and
+// the grenade is slot 3. Dying resets a fighter to the standard-issue
+// rifle; surviving a round keeps whatever they were carrying.
 import * as THREE from 'three';
-import { PALETTE } from './palette.js';
-
-// One row per weapon: id, display name, buy-menu slot, price, kind, damage,
-// headshot multiplier, seconds between shots, full-auto?, magazine, reserve ammo,
-// reload seconds, spread standing, spread on the move, recoil kick, range in metres.
-const SPEC_ROWS = [
-  ['pistol', 'P9 Sidearm', 2, 300, 'pistol', 26, 3.0, 0.16, false, 12, 36, 1.5, 0.004, 0.024, 0.011, 60],
-  ['smg', 'Kestrel-9', 1, 1500, 'smg', 22, 3.0, 0.075, true, 32, 96, 1.7, 0.006, 0.03, 0.008, 55],
-  ['rifle', 'AR-77 Longshot', 1, 2700, 'rifle', 33, 3.2, 0.096, true, 30, 90, 1.9, 0.0022, 0.028, 0.013, 80],
-  ['sniper', 'Lance .50', 1, 4750, 'sniper', 95, 2.0, 1.1, false, 5, 15, 2.6, 0.0006, 0.05, 0.05, 120],
-  ['grenade', 'Frag Grenade', 3, 300, 'grenade', 0, 1, 0.9, false, 1, 0, 0, 0, 0, 0, 0],
-];
-const SPEC_FIELDS = ['id', 'name', 'slot', 'price', 'kind', 'damage', 'headMult', 'fireGap', 'auto', 'mag', 'reserve', 'reloadTime', 'spreadStill', 'spreadMove', 'recoil', 'range'];
-
-export const WEAPONS = {};
-for (const row of SPEC_ROWS) {
-  const def = {};
-  SPEC_FIELDS.forEach((field, i) => { def[field] = row[i]; });
-  WEAPONS[def.id] = def;
-}
 
 export const ARMOR_PRICE = 650;
-export const ARMOR_VALUE = 100;
 
-// ---------- view models ----------
-// One part row: [shape, size args, material, x, y, z, rotX?] — assembled in order.
-// Shapes: box [w,h,d], tube [rTop, rBottom, len, segments], ball [r, wSeg, hSeg].
-const MODEL_PARTS = {
-  pistol: [
-    ['box', [0.05, 0.06, 0.24], 'body', 0, 0, 0],
-    ['box', [0.045, 0.07, 0.2], 'grip', 0, -0.02, 0.02],
-    ['box', [0.045, 0.12, 0.07], 'grip', 0, -0.09, 0.09, 0.25],
-  ],
-  smg: [
-    ['box', [0.07, 0.09, 0.34], 'body', 0, 0, 0],
-    ['box', [0.04, 0.04, 0.26], 'grip', 0, 0.02, -0.28],
-    ['box', [0.05, 0.16, 0.06], 'grip', 0, -0.1, -0.02],
-    ['box', [0.06, 0.07, 0.16], 'grip', 0, -0.01, 0.24],
-  ],
-  sniper: [
-    ['box', [0.08, 0.1, 0.5], 'body', 0, 0, 0],
-    ['box', [0.035, 0.035, 0.55], 'grip', 0, 0.03, -0.5],
-    ['tube', [0.035, 0.035, 0.2, 12], 'accent', 0, 0.09, -0.05, Math.PI / 2],
-    ['box', [0.07, 0.09, 0.24], 'grip', 0, -0.02, 0.34],
-    ['box', [0.03, 0.12, 0.03], 'grip', 0, -0.08, -0.4],
-  ],
-  grenade: [
-    ['ball', [0.055, 12, 10], 'body', 0, 0, 0],
-    ['box', [0.02, 0.05, 0.02], 'accent', 0.05, 0.05, 0],
-  ],
-  rifle: [
-    ['box', [0.09, 0.1, 0.42], 'body', 0, 0, 0],
-    ['box', [0.045, 0.045, 0.4], 'grip', 0, 0.025, -0.38],
-    ['box', [0.075, 0.08, 0.22], 'grip', 0, -0.02, 0.3],
-    ['box', [0.03, 0.05, 0.08], 'accent', 0, 0.075, -0.05],
-  ],
+export const WEAPONS = {
+  rifle: {
+    id: 'rifle',
+    name: 'AR-77 Longshot',
+    kind: 'rifle',
+    slot: 1,
+    price: 2700,
+    damage: 34,
+    headMult: 3,
+    mag: 30,
+    reserve: 90,
+    range: 120,
+    auto: true,
+    interval: 0.11,
+    reload: 2.2,
+    recoil: 1.0,
+    spread: 0.004,
+    desc: 'Auto rifle · 30 rounds · accurate',
+  },
+  smg: {
+    id: 'smg',
+    name: 'Kestrel-9',
+    kind: 'smg',
+    slot: 1,
+    price: 1500,
+    damage: 26,
+    headMult: 3,
+    mag: 32,
+    reserve: 96,
+    range: 60,
+    auto: true,
+    interval: 0.085,
+    reload: 1.9,
+    recoil: 0.7,
+    spread: 0.007,
+    desc: 'Fast SMG · 32 rounds · close quarters',
+  },
+  sniper: {
+    id: 'sniper',
+    name: 'Lance .50',
+    kind: 'sniper',
+    slot: 1,
+    price: 4750,
+    damage: 110,
+    headMult: 3,
+    mag: 5,
+    reserve: 15,
+    range: 200,
+    auto: false,
+    interval: 1.4,
+    reload: 3.0,
+    recoil: 2.2,
+    spread: 0.001,
+    desc: 'Bolt sniper · 5 rounds · one-shot body',
+  },
+  pistol: {
+    id: 'pistol',
+    name: 'P9 Sidearm',
+    kind: 'pistol',
+    slot: 2,
+    price: 300,
+    damage: 22,
+    headMult: 3,
+    mag: 12,
+    reserve: 48,
+    range: 50,
+    auto: false,
+    interval: 0.18,
+    reload: 1.4,
+    recoil: 0.5,
+    spread: 0.006,
+    desc: 'Sidearm · 12 rounds · always with you',
+  },
+  grenade: {
+    id: 'grenade',
+    name: 'Frag Grenade',
+    kind: 'grenade',
+    slot: 3,
+    price: 300,
+    damage: 0,
+    headMult: 1,
+    mag: 0,
+    reserve: 0,
+    range: 0,
+    auto: false,
+    interval: 0.5,
+    reload: 0,
+    recoil: 0,
+    spread: 0,
+    desc: 'Frag grenade · throw with G',
+  },
 };
 
-function makeGunMaterials() {
-  return {
-    grip: new THREE.MeshStandardMaterial({ color: new THREE.Color(PALETTE.hairline), roughness: 0.7, metalness: 0.25 }),
-    body: new THREE.MeshStandardMaterial({ color: 0x2e3138, roughness: 0.45, metalness: 0.6 }),
-    accent: new THREE.MeshStandardMaterial({ color: new THREE.Color(PALETTE.accent), roughness: 0.5, metalness: 0.2 }),
-  };
-}
+const GRENADE_CAP = 2;
+const SPREAD_PER_SPEED = 0.0011;
 
-function buildGunModel(def, mats) {
-  const model = new THREE.Group();
-  for (const [shape, size, mat, px, py, pz, rotX] of MODEL_PARTS[def.kind]) {
-    let geo;
-    if (shape === 'box') geo = new THREE.BoxGeometry(size[0], size[1], size[2]);
-    else if (shape === 'tube') geo = new THREE.CylinderGeometry(size[0], size[1], size[2], size[3]);
-    else geo = new THREE.SphereGeometry(size[0], size[1], size[2]);
-    const part = new THREE.Mesh(geo, mats[mat]);
-    part.position.set(px, py, pz);
-    if (rotX) part.rotation.x = rotX;
-    model.add(part);
+function fullAmmo() {
+  const ammo = {};
+  for (const key of Object.keys(WEAPONS)) {
+    const def = WEAPONS[key];
+    ammo[key] = { mag: def.mag, reserve: def.reserve };
   }
-  model.position.set(0.27, -0.25, -0.46);
-  model.scale.setScalar(0.8);
-  return model;
+  return ammo;
 }
 
-function makeFlashTexture() {
-  const canvas = document.createElement('canvas');
-  Object.assign(canvas, { width: 128, height: 128 });
-  const g = canvas.getContext('2d');
-  const grad = g.createRadialGradient(64, 64, 2, 64, 64, 64);
-  const stops = [
-    [0, 'rgba(255, 240, 200, 1)'], [0.25, 'rgba(240, 168, 48, 0.9)'],
-    [0.6, 'rgba(240, 140, 40, 0.35)'], [1, 'rgba(240, 140, 40, 0)'],
-  ];
-  for (const [at, color] of stops) grad.addColorStop(at, color);
-  g.fillStyle = grad;
-  g.fillRect(0, 0, 128, 128);
-  return new THREE.CanvasTexture(canvas);
+// ---- View models: one small gun-shaped group per weapon, hung off the
+// camera for the player only. Bots get no camera and no view model.
+function gunMetal(color, rough, metal) {
+  return new THREE.MeshStandardMaterial({ color, roughness: rough, metalness: metal });
 }
 
-// One fighter's loadout: primary + sidearm + grenades, with per-weapon ammo state.
+function box(w, h, d, mat, x, y, z) {
+  const mesh = new THREE.Mesh(new THREE.BoxGeometry(w, h, d), mat);
+  mesh.position.set(x, y, z);
+  return mesh;
+}
+
+function buildViewModel(kind) {
+  const group = new THREE.Group();
+  const dark = gunMetal(new THREE.Color('#1c1f24'), 0.55, 0.6);
+  const mid = gunMetal(new THREE.Color('#2e343c'), 0.6, 0.5);
+  const accent = gunMetal(new THREE.Color('#f0a830'), 0.5, 0.4);
+  if (kind === 'rifle') {
+    group.add(box(0.09, 0.12, 0.52, dark, 0, 0, -0.1));
+    group.add(box(0.05, 0.05, 0.4, mid, 0, 0.02, -0.5));
+    group.add(box(0.06, 0.17, 0.1, accent, 0, -0.13, -0.08));
+    group.add(box(0.08, 0.09, 0.18, mid, 0, -0.01, 0.22));
+    group.add(box(0.03, 0.03, 0.06, accent, 0, 0.075, -0.28));
+  } else if (kind === 'smg') {
+    group.add(box(0.09, 0.11, 0.34, dark, 0, 0, -0.04));
+    group.add(box(0.05, 0.05, 0.22, mid, 0, 0.02, -0.3));
+    group.add(box(0.05, 0.13, 0.08, accent, 0, -0.11, -0.02));
+    group.add(box(0.07, 0.08, 0.12, mid, 0, -0.01, 0.16));
+  } else if (kind === 'sniper') {
+    group.add(box(0.08, 0.1, 0.62, dark, 0, 0, -0.12));
+    group.add(box(0.035, 0.035, 0.5, mid, 0, 0.02, -0.55));
+    group.add(box(0.05, 0.06, 0.22, mid, 0, 0.09, -0.12));
+    group.add(box(0.05, 0.12, 0.08, accent, 0, -0.1, -0.05));
+    group.add(box(0.07, 0.08, 0.14, mid, 0, -0.01, 0.24));
+  } else if (kind === 'pistol') {
+    group.add(box(0.07, 0.09, 0.24, dark, 0, 0, -0.05));
+    group.add(box(0.06, 0.14, 0.08, mid, 0, -0.1, 0.04));
+    group.add(box(0.02, 0.03, 0.05, accent, 0, 0.05, -0.14));
+  } else {
+    // Grenade: a dark sphere with a pull ring on top.
+    const ball = new THREE.Mesh(new THREE.SphereGeometry(0.055, 12, 10), dark);
+    group.add(ball);
+    const pin = new THREE.Mesh(new THREE.TorusGeometry(0.03, 0.008, 6, 12), mid);
+    pin.position.set(0, 0.07, 0);
+    pin.rotation.x = Math.PI / 2;
+    group.add(pin);
+  }
+  return group;
+}
+
 export function createLoadout(camera, isPlayer) {
-  const mats = makeGunMaterials();
-  const models = {};
-  for (const def of Object.values(WEAPONS)) {
-    const model = buildGunModel(def, mats);
-    model.visible = false;
-    if (isPlayer) camera.add(model);
-    models[def.id] = model;
-  }
-
-  // Muzzle flash: radial-gradient burst quad (no hard square edges) + a light.
-  const flash = new THREE.Mesh(
-    new THREE.PlaneGeometry(0.2, 0.2),
-    new THREE.MeshBasicMaterial({ map: makeFlashTexture(), transparent: true, opacity: 0.95, depthWrite: false, side: THREE.DoubleSide }),
-  );
-  flash.position.set(0.27, -0.22, -0.88);
-  flash.visible = false;
-  const flashLight = new THREE.PointLight(new THREE.Color(PALETTE.accent), 0, 6);
-  flashLight.position.set(0.27, -0.2, -0.7);
-  if (isPlayer) {
-    camera.add(flash);
-    camera.add(flashLight);
-  }
-
   const state = {
     primary: 'rifle',
     current: 'rifle',
-    ammo: {},
-    cooldown: 0,
-    reloadLeft: 0,
-    flash: 0,
-    kick: 0,
     grenades: 0,
   };
-  for (const def of Object.values(WEAPONS)) {
-    state.ammo[def.id] = { mag: def.mag, reserve: def.reserve };
-  }
-  state.ammo.pistol = { mag: 12, reserve: 36 };
+  let ammo = fullAmmo();
+  let clock = 0;
+  let readyAt = 0;
+  let reloading = false;
+  let reloadDoneAt = 0;
+  let kick = 0;
+  let viewModel = null;
+  let viewKind = '';
 
-  function currentDef() {
+  function refreshViewModel() {
+    if (!isPlayer || !camera) return;
+    const kind = state.current;
+    if (viewModel && viewKind === kind) return;
+    if (viewModel) {
+      camera.remove(viewModel);
+      viewModel = null;
+    }
+    viewModel = buildViewModel(WEAPONS[kind].kind);
+    viewModel.position.set(0.27, -0.23, -0.48);
+    viewModel.rotation.set(0, 0.06, 0);
+    camera.add(viewModel);
+    viewKind = kind;
+  }
+  refreshViewModel();
+
+  function def() {
     return WEAPONS[state.current];
   }
 
-  function showModel() {
-    for (const id of Object.keys(models)) models[id].visible = id === state.current;
-  }
-  showModel();
-
-  function finishReload() {
-    const def = currentDef();
-    const slot = state.ammo[def.id];
-    const need = def.mag - slot.mag;
-    const take = Math.min(need, slot.reserve);
-    slot.mag += take;
-    slot.reserve -= take;
+  function takeRound() {
+    if (state.current === 'grenade') {
+      if (state.grenades <= 0) return false;
+      state.grenades -= 1;
+      return true;
+    }
+    const slot = ammo[state.current];
+    if (!slot || slot.mag <= 0) return false;
+    slot.mag -= 1;
+    return true;
   }
 
-  function fullAmmo(id) {
-    return { mag: WEAPONS[id].mag, reserve: WEAPONS[id].reserve };
+  function pullTrigger() {
+    readyAt = clock + def().interval;
+    kick = 1;
+  }
+
+  function ready() {
+    return clock >= readyAt && !reloading;
+  }
+
+  function reload() {
+    if (reloading) return false;
+    const slot = ammo[state.current];
+    const spec = def();
+    if (!slot || slot.mag >= spec.mag || slot.reserve <= 0) return false;
+    reloading = true;
+    reloadDoneAt = clock + spec.reload;
+    return true;
+  }
+
+  function switchTo(id) {
+    if (id === 'grenade') {
+      if (state.grenades <= 0) return false;
+      state.current = 'grenade';
+      refreshViewModel();
+      return true;
+    }
+    const spec = WEAPONS[id];
+    if (!spec || spec.kind === 'grenade') return false;
+    state.current = id;
+    refreshViewModel();
+    return true;
+  }
+
+  function buyPrimary(id) {
+    const spec = WEAPONS[id];
+    if (!spec || spec.slot !== 1) return false;
+    state.primary = id;
+    state.current = id;
+    ammo[id] = { mag: spec.mag, reserve: spec.reserve };
+    refreshViewModel();
+    return true;
+  }
+
+  function addGrenade() {
+    if (state.grenades >= GRENADE_CAP) return false;
+    state.grenades += 1;
+    return true;
+  }
+
+  function resetRound(survived) {
+    if (survived) return;
+    state.primary = 'rifle';
+    state.current = 'rifle';
+    state.grenades = 0;
+    ammo = fullAmmo();
+    reloading = false;
+    readyAt = 0;
+    refreshViewModel();
+  }
+
+  // Bot round reset: back to the free P9 with a full sidearm load and
+  // no grenades, ready for buyFor to spend the round's money. The player
+  // never calls this — resetRound covers the player's keep-or-lose rule.
+  function resetToSidearm() {
+    state.primary = 'pistol';
+    state.current = 'pistol';
+    state.grenades = 0;
+    ammo = fullAmmo();
+    reloading = false;
+    readyAt = 0;
+    refreshViewModel();
+  }
+
+  function ammoText() {
+    if (state.current === 'grenade') {
+      return { mag: state.grenades, reserve: 0, label: '/ ' };
+    }
+    const slot = ammo[state.current];
+    return { mag: slot.mag, reserve: slot.reserve, label: '/ ' };
+  }
+
+  function spread(speed) {
+    return def().spread + Math.max(0, speed) * SPREAD_PER_SPEED;
+  }
+
+  function step(dt) {
+    clock += dt;
+    if (reloading && clock >= reloadDoneAt) {
+      reloading = false;
+      const slot = ammo[state.current];
+      const spec = def();
+      const need = spec.mag - slot.mag;
+      const moved = Math.min(need, slot.reserve);
+      slot.mag += moved;
+      slot.reserve -= moved;
+    }
+    if (kick > 0) {
+      kick = Math.max(0, kick - dt * 6);
+      if (viewModel) {
+        viewModel.position.z = -0.48 + kick * 0.05;
+        viewModel.rotation.x = kick * 0.06;
+      }
+    }
   }
 
   return {
     state,
-    models,
-    def() {
-      return currentDef();
-    },
-    step(dt) {
-      state.cooldown = Math.max(0, state.cooldown - dt);
-      state.flash = Math.max(0, state.flash - dt);
-      state.kick += (0 - state.kick) * Math.min(1, dt * 14);
-      const model = models[state.current];
-      if (model) {
-        model.position.z = -0.42 + state.kick;
-        model.rotation.x = state.kick * 2.2;
-      }
-      flash.visible = state.flash > 0;
-      flash.rotation.z = state.flash * 30;
-      flashLight.intensity = state.flash > 0 ? 18 : 0;
-      if (state.reloadLeft > 0) {
-        state.reloadLeft = Math.max(0, state.reloadLeft - dt);
-        if (model) model.rotation.x = -0.55 * Math.min(1, (currentDef().reloadTime - state.reloadLeft) * 2);
-        if (state.reloadLeft === 0) finishReload();
-      }
-    },
-    ready() {
-      const def = currentDef();
-      if (def.kind === 'grenade') return state.grenades > 0 && state.cooldown === 0;
-      return state.ammo[def.id].mag > 0 && state.cooldown === 0 && state.reloadLeft === 0;
-    },
-    takeRound() {
-      const def = currentDef();
-      if (def.kind === 'grenade') {
-        if (state.grenades <= 0) return false;
-        state.grenades -= 1;
-        return true;
-      }
-      const slot = state.ammo[def.id];
-      if (slot.mag <= 0) return false;
-      slot.mag -= 1;
-      return true;
-    },
-    pullTrigger() {
-      state.cooldown = currentDef().fireGap;
-      state.flash = 0.06;
-      state.kick = 0.055;
-    },
-    reload() {
-      const def = currentDef();
-      if (def.kind === 'grenade') return;
-      const slot = state.ammo[def.id];
-      if (state.reloadLeft > 0 || slot.mag === def.mag || slot.reserve === 0) return;
-      state.reloadLeft = def.reloadTime;
-    },
-    spread(speed) {
-      const def = currentDef();
-      return def.spreadStill + Math.min(1, speed / 5.2) * def.spreadMove;
-    },
-    switchTo(id) {
-      if (!WEAPONS[id] || state.current === id) return false;
-      if (id === state.primary || id === 'pistol' || id === 'grenade') {
-        state.current = id;
-        state.reloadLeft = 0;
-        showModel();
-        return true;
-      }
-      return false;
-    },
-    buyPrimary(id) {
-      state.primary = id;
-      state.current = id;
-      state.ammo[id] = fullAmmo(id);
-      state.reloadLeft = 0;
-      showModel();
-    },
-    addGrenade() {
-      state.grenades += 1;
-    },
-    resetRound(keepWeapons) {
-      if (!keepWeapons) {
-        state.primary = 'rifle';
-        state.ammo.rifle = fullAmmo('rifle');
-        state.ammo.smg = fullAmmo('smg');
-        state.ammo.sniper = fullAmmo('sniper');
-        state.ammo.pistol = fullAmmo('pistol');
-        state.grenades = 0;
-      }
-      state.current = state.primary;
-      state.cooldown = 0;
-      state.reloadLeft = 0;
-      state.flash = 0;
-      state.kick = 0;
-      showModel();
-    },
-    ammoText() {
-      const def = currentDef();
-      if (def.kind === 'grenade') return { mag: state.grenades, reserve: 0, label: 'x' };
-      const slot = state.ammo[def.id];
-      return { mag: slot.mag, reserve: slot.reserve, label: '/ ' };
-    },
+    def,
+    takeRound,
+    pullTrigger,
+    ready,
+    reload,
+    switchTo,
+    buyPrimary,
+    addGrenade,
+    resetRound,
+    resetToSidearm,
+    ammoText,
+    spread,
+    step,
   };
 }
