@@ -1,16 +1,15 @@
-// Boot and the one loop: a fixed 60 Hz simulation feeding a render at the display's rate.
-// FERROLINE — a round-based tactical FPS: 5v5, spike plant/defuse, economy and a buy
-// menu, bots that walk routes, hold angles and shoot back. ?shot=start|play|buy|end
-// with &seed=N sets up a deterministic frame for a capture, renders it twice, then
-// freezes it and sets window.__shotReady.
+// FERROLINE entry point: boots the renderer, wires every module together and
+// runs the fixed-timestep loop. Five attackers against five defenders, spike
+// plant and defuse, a buy phase with an economy, bots that patrol routes and
+// hold angles. ?shot=start|play|buy|end plus &seed=N renders one frozen
+// frame for a capture: it paints twice, then sets window.__shotReady.
 //
-// COMBAT GATING — the rule this file enforces alongside game.js: no combat
-// outside the live phase. enemiesOf() returns an empty list unless the phase
-// is 'live' (bots cannot spot or shoot anyone during buy / roundEnd /
-// matchEnd), grenade blast damage is skipped unless the phase is 'live'
-// (a fuse that runs past the round end must not kill bots), and the player
-// can only fire while the phase is 'live'. The buy phase is bloodless
-// because every damage path checks the phase before dealing damage.
+// FIGHTING ONLY HAPPENS WHILE A ROUND IS LIVE. That rule lives here and in
+// game.js: listFoes() stays empty outside the live phase, so bots never spot
+// or shoot each other (or the player) during buy, roundEnd or matchEnd;
+// grenade blast damage is skipped outside live (a fuse outliving the round
+// must not kill anyone); and the trigger only fires while live. The buy
+// phase stays bloodless because every damage path checks the phase first.
 import * as THREE from 'three';
 import { PALETTE } from './palette.js';
 import { createWorld } from './world.js';
@@ -24,97 +23,97 @@ import { createEffects } from './effects.js';
 import { createAudio } from './audio.js';
 import { createHud } from './hud.js';
 
-// ---- Simulation and camera constants ----
-const FIXED_STEP = 1 / 60; // fixed simulation step (60 Hz)
-const MAX_FRAME_DT = 0.1; // clamp a long frame to 100 ms of simulation
-const MAX_STEPS_PER_FRAME = 5; // never run more than 5 fixed steps per frame
-const EYE = 1.55; // bot eye height above the ground (aim origin)
-const PLAYER_EYE_OFFSET = 1.25; // bot aim height on the player capsule
-const BOT_EYE_OFFSET = 1.2; // bot aim height on another bot
-const RAYCAST_FAR = 140; // default raycast range (m)
-const CAMERA_FOV = 74;
-const CAMERA_NEAR = 0.05;
-const CAMERA_FAR = 300;
-const FOG_NEAR = 34;
-const FOG_FAR = 110;
-const MAX_PIXEL_RATIO = 2;
-const TONE_MAPPING_EXPOSURE = 1.0;
-const TRAUMA_DECAY = 0.02; // camera trauma recovered per frame
-const TRAUMA_SHAKE = 0.02; // shake scale (multiplied by trauma^2)
+// ---- Loop, camera and feel ----
+const TICK = 1 / 60;
+const MAX_DT = 0.1;
+const MAX_TICKS = 5;
+const EYE_HEIGHT = 1.55;
+const PLAYER_AIM_HEIGHT = 1.25;
+const BOT_AIM_HEIGHT = 1.2;
+const RAY_RANGE = 140;
+const VIEW_FOV = 74;
+const VIEW_NEAR = 0.05;
+const VIEW_FAR = 300;
+const FOG_START = 34;
+const FOG_END = 110;
+const PIXEL_CAP = 2;
+const EXPOSURE = 1.0;
+const SHAKE_RECOVER = 0.02;
+const SHAKE_SCALE = 0.02;
 
-// ---- Grenade constants ----
-const GRENADE_THROW_SPEED = 15; // horizontal throw speed (m/s)
-const GRENADE_THROW_UP = 4.5; // upward throw component (m/s)
-const GRENADE_FUSE = 1.6; // seconds from throw to explosion
-const GRENADE_GRAVITY = 16; // downward acceleration (m/s^2)
-const GRENADE_BOUNCE = 0.45; // velocity kept on the dominant bounce axis
-const GRENADE_FRICTION = 0.7; // velocity kept on the other axes per bounce
-const GRENADE_FLOOR_Y = 0.09; // grenade radius: rest height on the floor
-const GRENADE_FLOOR_BOUNCE_MIN_SPEED = 1.5; // below this, floor hits are silent
-const GRENADE_SPAWN_AHEAD = 0.6; // spawn distance in front of the camera
-const BLAST_RADIUS = 6.5; // grenade lethal radius (m)
-const BLAST_CENTER_DMG = 110; // damage at the centre of the blast
-const BLAST_EDGE_DMG = 15; // damage at the edge of the blast
-const BLAST_VICTIM_HEIGHT = 1.1; // chest height used for blast distance
-const BLAST_NOISE_RADIUS = 42; // how far the explosion can be heard
-const TRAUMA_GRENADE = 0.7; // camera trauma added by an explosion
+// ---- Grenades ----
+const LOB_SPEED = 15;
+const LOB_LIFT = 4.5;
+const GRENADE_TIMER = 1.6;
+const GRENADE_PULL = 16;
+const BOUNCE_KEEP = 0.45;
+const BOUNCE_DRAG = 0.7;
+const GRENADE_REST = 0.09;
+const BOUNCE_SILENT_BELOW = 1.5;
+const THROW_AHEAD = 0.6;
+const BLAST_REACH = 6.5;
+const BLAST_MID_DMG = 110;
+const BLAST_RIM_DMG = 15;
+const BLAST_CHEST = 1.1;
+const BLAST_HEARING = 42;
+const SHAKE_BLAST = 0.7;
 
-// ---- Shooting constants ----
-const HEADSHOT_AIM_CHANCE = 0.14; // bots aim for the head this often
-const HEADSHOT_AIM_OFFSET = 0.32; // vertical aim offset for a headshot attempt
-const MUZZLE_AHEAD = 0.5; // player tracer start, ahead of the camera
-const BOT_MUZZLE_AHEAD = 0.6; // bot tracer start, ahead of the muzzle
-const PLAYER_HALF_WIDTH = 0.34; // player capsule half-width (m)
-const PLAYER_HEIGHT = 1.72; // player capsule height (m)
-const PLAYER_HEAD_LINE = 1.45; // above this height a hit counts as a headshot
-const BOT_HEARING_RANGE = 30; // within this range bot shots use the near sound
-const NOISE_SHOT_RIFLE = 26; // noise radius of a rifle-class shot
-const NOISE_SHOT_SNIPER = 34; // noise radius of a sniper shot
-const NOISE_SHOT_BOT = 22; // noise radius of a bot shot
-const TRAUMA_SHOT = 0.08; // camera trauma per normal shot
-const TRAUMA_SHOT_SNIPER = 0.35; // camera trauma per sniper shot
-const RECOIL_BASE = 0.009; // base pitch recoil
-const RECOIL_REFERENCE = 0.013; // recoil normalisation (rifle recoil)
-const RECOIL_JITTER = 0.004; // random pitch/yaw recoil jitter
+// ---- Shooting ----
+const HEAD_AIM_ODDS = 0.14;
+const HEAD_AIM_LIFT = 0.32;
+const TRACER_AHEAD = 0.5;
+const BOT_TRACER_AHEAD = 0.6;
+const CAPSULE_HALF = 0.34;
+const CAPSULE_HEIGHT = 1.72;
+const HEAD_LINE = 1.45;
+const BOT_HEAR_DIST = 30;
+const NOISE_RIFLE = 26;
+const NOISE_SNIPER = 34;
+const NOISE_BOT = 22;
+const SHAKE_SHOT = 0.08;
+const SHAKE_SNIPER = 0.35;
+const KICK_BASE = 0.009;
+const KICK_NORM = 0.013;
+const KICK_SPREAD = 0.004;
 
-// ---- HUD / movement constants ----
-const STEP_INTERVAL = 0.42; // seconds between footstep sounds while moving
-const MIN_MOVE_SPEED_FOR_STEPS = 1; // below this speed no footsteps play
-const CROSSHAIR_BASE_PX = 4; // crosshair spread at rest (px)
-const CROSSHAIR_SPREAD_SCALE = 900; // spread units -> px
-const CROSSHAIR_MAX_PX = 34; // crosshair spread cap (px)
-const HITMARKER_MS = 90; // hitmarker display time (ms)
-const HITMARKER_SHOT_MS = 4000; // hitmarker display time in the play capture
+// ---- HUD and footsteps ----
+const STEP_GAP = 0.42;
+const STEP_MIN_SPEED = 1;
+const CROSS_REST = 4;
+const CROSS_SCALE = 900;
+const CROSS_CAP = 34;
+const MARK_MS = 90;
+const MARK_SHOT_MS = 4000;
 
-const params = new URLSearchParams(window.location.search);
-const shot = params.get('shot');
-const seed = Number.parseInt(params.get('seed') ?? '1', 10) || 1;
+const query = new URLSearchParams(window.location.search);
+const shotName = query.get('shot');
+const seedValue = Number.parseInt(query.get('seed') ?? '1', 10) || 1;
 
-function mulberry32(initial) {
-  let a = initial;
-  return function random() {
-    a |= 0;
-    a = (a + 0x6d2b79f5) | 0;
-    let t = Math.imul(a ^ (a >>> 15), 1 | a);
-    t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t;
-    return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+function seededRandom(initialSeed) {
+  let state = initialSeed;
+  return function nextRandom() {
+    state |= 0;
+    state = (state + 0x6d2b79f5) | 0;
+    let mixed = Math.imul(state ^ (state >>> 15), 1 | state);
+    mixed = (mixed + Math.imul(mixed ^ (mixed >>> 7), 61 | mixed)) ^ mixed;
+    return ((mixed ^ (mixed >>> 14)) >>> 0) / 4294967296;
   };
 }
-const random = mulberry32(seed);
+const random = seededRandom(seedValue);
 
 const renderer = new THREE.WebGLRenderer({ antialias: true, powerPreference: 'high-performance' });
-renderer.setPixelRatio(Math.min(window.devicePixelRatio, MAX_PIXEL_RATIO));
+renderer.setPixelRatio(Math.min(window.devicePixelRatio, PIXEL_CAP));
 renderer.setSize(window.innerWidth, window.innerHeight);
 renderer.shadowMap.enabled = true;
 renderer.shadowMap.type = THREE.PCFShadowMap;
 renderer.toneMapping = THREE.ACESFilmicToneMapping;
-renderer.toneMappingExposure = TONE_MAPPING_EXPOSURE;
+renderer.toneMappingExposure = EXPOSURE;
 document.getElementById('game').appendChild(renderer.domElement);
 
 const scene = new THREE.Scene();
 scene.background = new THREE.Color(PALETTE.canvas);
-scene.fog = new THREE.Fog(new THREE.Color('#232a38'), FOG_NEAR, FOG_FAR);
-const camera = new THREE.PerspectiveCamera(CAMERA_FOV, window.innerWidth / window.innerHeight, CAMERA_NEAR, CAMERA_FAR);
+scene.fog = new THREE.Fog(new THREE.Color('#232a38'), FOG_START, FOG_END);
+const camera = new THREE.PerspectiveCamera(VIEW_FOV, window.innerWidth / window.innerHeight, VIEW_NEAR, VIEW_FAR);
 scene.add(camera);
 
 const world = createWorld(scene);
@@ -130,109 +129,110 @@ for (const bot of botsApi.bots) {
   bot.findPath = botsApi.findPath;
 }
 const game = createGame(world, botsApi, player, loadout, hud, audio, effects);
-const input = createInput(renderer.domElement, onLockChange);
+const input = createInput(renderer.domElement, handleLockChange);
 
 const body = player.state;
 const raycaster = new THREE.Raycaster();
-raycaster.far = RAYCAST_FAR;
-const direction = new THREE.Vector3();
-const tmpV = new THREE.Vector3();
-const tmpV2 = new THREE.Vector3();
+raycaster.far = RAY_RANGE;
+const aimDir = new THREE.Vector3();
+const scratch = new THREE.Vector3();
+const scratch2 = new THREE.Vector3();
 const playerBox = new THREE.Box3();
 const hitPoint = new THREE.Vector3();
 
-let elapsed = 0;
-let frozen = false;
+let clock = 0;
+let held = false;
 let started = false;
 let accumulator = 0;
 let lastTime = performance.now();
-let trauma = 0;
-let stepTimer = 0;
-let lastWeapon = 'rifle';
-let wasFiring = false;
-let buyOpen = false;
-let grenades = [];
+let shakeAmt = 0;
+let stepClock = 0;
+let previousGun = 'rifle';
+let firingLastFrame = false;
+let shopOpen = false;
+let liveGrenades = [];
 
-// ---- Grenades: thrown with an arc, bounce off colliders, explode on the fuse. ----
-const grenadeGeo = new THREE.SphereGeometry(GRENADE_FLOOR_Y, 10, 8);
+// ---- Grenades: arced throws that bounce off the map and blow on a fuse. ----
+const grenadeGeo = new THREE.SphereGeometry(GRENADE_REST, 10, 8);
 const grenadeMat = new THREE.MeshStandardMaterial({ color: new THREE.Color('#22252a'), roughness: 0.5, metalness: 0.5 });
 
-function throwGrenade(from, dir) {
+function lobGrenade(from, dir) {
   const mesh = new THREE.Mesh(grenadeGeo, grenadeMat);
   mesh.position.copy(from);
   mesh.castShadow = true;
   scene.add(mesh);
-  grenades.push({
+  liveGrenades.push({
     mesh,
-    vel: tmpV.copy(dir).multiplyScalar(GRENADE_THROW_SPEED).add(new THREE.Vector3(0, GRENADE_THROW_UP, 0)).clone(),
-    fuse: GRENADE_FUSE,
+    vel: scratch.copy(dir).multiplyScalar(LOB_SPEED).add(new THREE.Vector3(0, LOB_LIFT, 0)).clone(),
+    fuse: GRENADE_TIMER,
   });
   audio.grenadeBounce();
 }
 
-function explodeGrenade(g) {
+function detonate(g) {
   const pos = g.mesh.position.clone();
   scene.remove(g.mesh);
   effects.explosion(pos);
   audio.explosion();
-  trauma = Math.min(1, trauma + TRAUMA_GRENADE);
-  game.addNoise(pos.x, pos.z, BLAST_NOISE_RADIUS);
-  // Radius damage with falloff: BLAST_CENTER_DMG at the centre, BLAST_EDGE_DMG at BLAST_RADIUS.
+  shakeAmt = Math.min(1, shakeAmt + SHAKE_BLAST);
+  game.addNoise(pos.x, pos.z, BLAST_HEARING);
+  // Damage falls off with distance: BLAST_MID_DMG at the centre, BLAST_RIM_DMG at the rim.
   const victims = [];
-  if (player.state.alive) victims.push({ kind: 'player', pos: tmpV2.copy(body.position).setY(body.position.y + BLAST_VICTIM_HEIGHT).clone(), ref: 'player' });
+  if (player.state.alive) victims.push({ kind: 'player', pos: scratch2.copy(body.position).setY(body.position.y + BLAST_CHEST).clone(), ref: 'player' });
   for (const b of botsApi.bots) {
-    if (b.alive) victims.push({ kind: 'bot', pos: b.group.position.clone().add(new THREE.Vector3(0, BLAST_VICTIM_HEIGHT, 0)), ref: b });
+    if (b.alive) victims.push({ kind: 'bot', pos: b.group.position.clone().add(new THREE.Vector3(0, BLAST_CHEST, 0)), ref: b });
   }
   for (const v of victims) {
     const d = v.pos.distanceTo(pos);
-    if (d > BLAST_RADIUS) continue;
+    if (d > BLAST_REACH) continue;
     // A wall between the blast and the victim blocks it.
-    raycaster.set(pos, tmpV.copy(v.pos).sub(pos).normalize());
+    raycaster.set(pos, scratch.copy(v.pos).sub(pos).normalize());
     raycaster.far = d;
     const blockedByWall = raycaster.intersectObjects(world.shootables, false)[0];
     if (blockedByWall) continue;
-    const dmg = Math.round(BLAST_CENTER_DMG - (d / BLAST_RADIUS) * (BLAST_CENTER_DMG - BLAST_EDGE_DMG));
-    // Damage only counts in the live phase: a fuse that runs past the round
-    // end must not kill bots during buy / roundEnd.
+    const dmg = Math.round(BLAST_MID_DMG - (d / BLAST_REACH) * (BLAST_MID_DMG - BLAST_RIM_DMG));
+    // Only live-phase damage counts: a fuse outliving the round must not
+    // kill bots during buy or roundEnd.
     if (game.state.phase !== 'live') continue;
     if (v.kind === 'player') game.damagePlayer(dmg, 'torso', null);
     else if (botsApi.damage(v.ref, dmg, 'torso')) game.onKill(v.ref, 'player', 'torso');
   }
 }
 
-function stepGrenades(dt) {
-  for (let i = grenades.length - 1; i >= 0; i -= 1) {
-    const g = grenades[i];
+function tickGrenades(dt) {
+  for (let i = liveGrenades.length - 1; i >= 0; i -= 1) {
+    const g = liveGrenades[i];
     g.fuse -= dt;
-    g.vel.y -= GRENADE_GRAVITY * dt;
+    g.vel.y -= GRENADE_PULL * dt;
     const next = g.mesh.position.clone().addScaledVector(g.vel, dt);
-    // Bounce: if the next point is inside a collider, reflect the dominant axis.
+    // Bounce: when the next point lands inside a collider, reflect the
+    // dominant axis and damp the rest.
     let bounced = false;
     for (const c of world.colliders) {
       if (c.containsPoint(next)) {
         const dx = Math.min(Math.abs(next.x - c.min.x), Math.abs(next.x - c.max.x));
         const dz = Math.min(Math.abs(next.z - c.min.z), Math.abs(next.z - c.max.z));
         const dy = Math.min(Math.abs(next.y - c.min.y), Math.abs(next.y - c.max.y));
-        if (dx <= dy && dx <= dz) g.vel.x *= -GRENADE_BOUNCE;
-        else if (dz <= dy) g.vel.z *= -GRENADE_BOUNCE;
-        else g.vel.y *= -GRENADE_BOUNCE;
-        g.vel.multiplyScalar(GRENADE_FRICTION);
+        if (dx <= dy && dx <= dz) g.vel.x *= -BOUNCE_KEEP;
+        else if (dz <= dy) g.vel.z *= -BOUNCE_KEEP;
+        else g.vel.y *= -BOUNCE_KEEP;
+        g.vel.multiplyScalar(BOUNCE_DRAG);
         bounced = true;
         audio.grenadeBounce();
         break;
       }
     }
     if (!bounced) g.mesh.position.copy(next);
-    if (g.mesh.position.y < GRENADE_FLOOR_Y) {
-      g.mesh.position.y = GRENADE_FLOOR_Y;
-      if (Math.abs(g.vel.y) > GRENADE_FLOOR_BOUNCE_MIN_SPEED) audio.grenadeBounce();
-      g.vel.y = Math.abs(g.vel.y) * GRENADE_BOUNCE;
-      g.vel.x *= GRENADE_FRICTION;
-      g.vel.z *= GRENADE_FRICTION;
+    if (g.mesh.position.y < GRENADE_REST) {
+      g.mesh.position.y = GRENADE_REST;
+      if (Math.abs(g.vel.y) > BOUNCE_SILENT_BELOW) audio.grenadeBounce();
+      g.vel.y = Math.abs(g.vel.y) * BOUNCE_KEEP;
+      g.vel.x *= BOUNCE_DRAG;
+      g.vel.z *= BOUNCE_DRAG;
     }
     if (g.fuse <= 0) {
-      explodeGrenade(g);
-      grenades.splice(i, 1);
+      detonate(g);
+      liveGrenades.splice(i, 1);
     }
   }
 }
@@ -240,126 +240,127 @@ function stepGrenades(dt) {
 // ---- Shooting: one hitscan path for the player, one for bots. ----
 const shootables = world.shootables.concat(botsApi.hitMeshes);
 
-function playerShoot(spread) {
+function firePlayerShot(spread) {
   const def = loadout.def();
   if (def.kind === 'grenade') {
     if (!loadout.takeRound()) return false;
-    camera.getWorldDirection(direction);
-    throwGrenade(tmpV.copy(camera.position).addScaledVector(direction, GRENADE_SPAWN_AHEAD).clone(), direction);
+    camera.getWorldDirection(aimDir);
+    lobGrenade(scratch.copy(camera.position).addScaledVector(aimDir, THROW_AHEAD).clone(), aimDir);
     loadout.pullTrigger();
-    loadout.switchTo(lastWeapon);
+    loadout.switchTo(previousGun);
     return true;
   }
   if (!loadout.takeRound()) {
     audio.dryFire();
     return false;
   }
-  camera.getWorldDirection(direction);
-  direction.x += (random() * 2 - 1) * spread;
-  direction.y += (random() * 2 - 1) * spread;
-  direction.z += (random() * 2 - 1) * spread;
-  direction.normalize();
+  camera.getWorldDirection(aimDir);
+  aimDir.x += (random() * 2 - 1) * spread;
+  aimDir.y += (random() * 2 - 1) * spread;
+  aimDir.z += (random() * 2 - 1) * spread;
+  aimDir.normalize();
   scene.updateMatrixWorld(true);
-  raycaster.set(camera.position, direction);
+  raycaster.set(camera.position, aimDir);
   raycaster.far = def.range;
   const hit = raycaster.intersectObjects(shootables, false)[0];
-  const muzzle = tmpV.copy(camera.position).addScaledVector(direction, MUZZLE_AHEAD).clone();
+  const muzzle = scratch.copy(camera.position).addScaledVector(aimDir, TRACER_AHEAD).clone();
   if (hit) {
     effects.tracer(muzzle, hit.point);
     const bot = hit.object.userData.bot;
     if (bot && bot.alive) {
       const part = hit.object.userData.part;
       const dmg = def.damage * (part === 'head' ? def.headMult : 1);
-      effects.blood(hit.point, hit.face ? hit.face.normal : tmpV2.set(0, 1, 0));
-      hud.hitMarker(false, HITMARKER_MS);
+      effects.blood(hit.point, hit.face ? hit.face.normal : scratch2.set(0, 1, 0));
+      hud.hitMarker(false, MARK_MS);
       if (part === 'head') audio.headshot();
       else audio.hit();
       if (botsApi.damage(bot, dmg, part)) game.onKill(bot, 'player', part);
     } else {
-      effects.impact(hit.point, hit.face ? hit.face.normal : tmpV2.set(0, 1, 0));
+      effects.impact(hit.point, hit.face ? hit.face.normal : scratch2.set(0, 1, 0));
     }
   } else {
-    effects.tracer(muzzle, tmpV.copy(camera.position).addScaledVector(direction, def.range));
+    effects.tracer(muzzle, scratch.copy(camera.position).addScaledVector(aimDir, def.range));
   }
   loadout.pullTrigger();
-  player.recoil(RECOIL_BASE * (def.recoil / RECOIL_REFERENCE) + random() * RECOIL_JITTER, (random() * 2 - 1) * RECOIL_JITTER);
-  game.addNoise(body.position.x, body.position.z, def.kind === 'sniper' ? NOISE_SHOT_SNIPER : NOISE_SHOT_RIFLE);
+  player.recoil(KICK_BASE * (def.recoil / KICK_NORM) + random() * KICK_SPREAD, (random() * 2 - 1) * KICK_SPREAD);
+  game.addNoise(body.position.x, body.position.z, def.kind === 'sniper' ? NOISE_SNIPER : NOISE_RIFLE);
   audio.shot(def.kind);
-  trauma = Math.min(1, trauma + (def.kind === 'sniper' ? TRAUMA_SHOT_SNIPER : TRAUMA_SHOT));
+  shakeAmt = Math.min(1, shakeAmt + (def.kind === 'sniper' ? SHAKE_SNIPER : SHAKE_SHOT));
   hud.setAmmo(loadout.ammoText().mag, loadout.ammoText().reserve, loadout.ammoText().label, def.name);
   return true;
 }
 
-// Bot-to-target shot: a real raycast with aim error, so bots miss moving targets.
-function botShoot(bot, target, err, def) {
-  const from = tmpV.copy(bot.group.position).setY(bot.group.position.y + EYE).clone();
+// A bot's shot: a real raycast with aim error, so moving targets get missed.
+function fireBotShot(bot, target, err, def) {
+  const from = scratch.copy(bot.group.position).setY(bot.group.position.y + EYE_HEIGHT).clone();
   const aim = target.isPlayer
-    ? tmpV2.copy(body.position).setY(body.position.y + PLAYER_EYE_OFFSET)
-    : tmpV2.copy(target.pos).setY(target.pos.y + BOT_EYE_OFFSET);
-  direction.copy(aim).sub(from).normalize();
-  // Aim error: mostly chest, sometimes the head.
-  const aimHead = random() < HEADSHOT_AIM_CHANCE;
-  if (aimHead) direction.y += HEADSHOT_AIM_OFFSET / Math.max(1, from.distanceTo(aim));
-  direction.x += (random() * 2 - 1) * err;
-  direction.y += (random() * 2 - 1) * err;
-  direction.z += (random() * 2 - 1) * err;
-  direction.normalize();
+    ? scratch2.copy(body.position).setY(body.position.y + PLAYER_AIM_HEIGHT)
+    : scratch2.copy(target.pos).setY(target.pos.y + BOT_AIM_HEIGHT);
+  aimDir.copy(aim).sub(from).normalize();
+  // Aim error: usually the chest, sometimes the head.
+  const aimHead = random() < HEAD_AIM_ODDS;
+  if (aimHead) aimDir.y += HEAD_AIM_LIFT / Math.max(1, from.distanceTo(aim));
+  aimDir.x += (random() * 2 - 1) * err;
+  aimDir.y += (random() * 2 - 1) * err;
+  aimDir.z += (random() * 2 - 1) * err;
+  aimDir.normalize();
   scene.updateMatrixWorld(true);
-  raycaster.set(from, direction);
+  raycaster.set(from, aimDir);
   raycaster.far = def.range;
   const hits = raycaster.intersectObjects(shootables, false);
   const hit = hits[0];
-  const muzzle = from.clone().addScaledVector(direction, BOT_MUZZLE_AHEAD);
+  const muzzle = from.clone().addScaledVector(aimDir, BOT_TRACER_AHEAD);
   if (target.isPlayer) {
     // The player is a capsule: test the ray against a box around them.
-    playerBox.min.set(body.position.x - PLAYER_HALF_WIDTH, body.position.y, body.position.z - PLAYER_HALF_WIDTH);
-    playerBox.max.set(body.position.x + PLAYER_HALF_WIDTH, body.position.y + PLAYER_HEIGHT, body.position.z + PLAYER_HALF_WIDTH);
+    playerBox.min.set(body.position.x - CAPSULE_HALF, body.position.y, body.position.z - CAPSULE_HALF);
+    playerBox.max.set(body.position.x + CAPSULE_HALF, body.position.y + CAPSULE_HEIGHT, body.position.z + CAPSULE_HALF);
     const playerHit = raycaster.ray.intersectBox(playerBox, hitPoint);
     const wallDist = hit ? hit.distance : Infinity;
     if (playerHit && hitPoint.distanceTo(from) < wallDist) {
       effects.tracer(muzzle, hitPoint.clone());
-      const part = hitPoint.y > body.position.y + PLAYER_HEAD_LINE ? 'head' : 'torso';
+      const part = hitPoint.y > body.position.y + HEAD_LINE ? 'head' : 'torso';
       game.damagePlayer(def.damage, part, bot);
-      // Direction indicator: 0 deg means the shooter is straight ahead.
+      // Direction indicator: 0 degrees means the shooter is straight ahead.
       const dx = bot.group.position.x - body.position.x;
       const dz = bot.group.position.z - body.position.z;
       const rel = Math.atan2(dx, dz) - body.yaw - Math.PI;
       hud.showDirection((rel * 180) / Math.PI);
     } else if (hit) {
       effects.tracer(muzzle, hit.point);
-      effects.impact(hit.point, hit.face ? hit.face.normal : tmpV2.set(0, 1, 0));
+      effects.impact(hit.point, hit.face ? hit.face.normal : scratch2.set(0, 1, 0));
     } else {
-      effects.tracer(muzzle, from.clone().addScaledVector(direction, def.range));
+      effects.tracer(muzzle, from.clone().addScaledVector(aimDir, def.range));
     }
   } else if (hit && hit.object.userData.bot === target.bot) {
     effects.tracer(muzzle, hit.point);
     const part = hit.object.userData.part;
     const dmg = def.damage * (part === 'head' ? def.headMult : 1);
-    effects.blood(hit.point, hit.face ? hit.face.normal : tmpV2.set(0, 1, 0));
+    effects.blood(hit.point, hit.face ? hit.face.normal : scratch2.set(0, 1, 0));
     if (botsApi.damage(target.bot, dmg, part)) game.onKill(target.bot, bot, part);
   } else if (hit) {
     effects.tracer(muzzle, hit.point);
-    effects.impact(hit.point, hit.face ? hit.face.normal : tmpV2.set(0, 1, 0));
+    effects.impact(hit.point, hit.face ? hit.face.normal : scratch2.set(0, 1, 0));
   } else {
-    effects.tracer(muzzle, from.clone().addScaledVector(direction, def.range));
+    effects.tracer(muzzle, from.clone().addScaledVector(aimDir, def.range));
   }
   const distToPlayer = from.distanceTo(body.position);
-  if (distToPlayer < BOT_HEARING_RANGE) audio.shot(def.kind);
+  if (distToPlayer < BOT_HEAR_DIST) audio.shot(def.kind);
   else audio.distantShot();
-  game.addNoise(bot.group.position.x, bot.group.position.z, NOISE_SHOT_BOT);
+  game.addNoise(bot.group.position.x, bot.group.position.z, NOISE_BOT);
 }
 
-// Line of sight between two points: clear when no world surface is closer than the target.
-function los(x1, y1, z1, x2, y2, z2) {
-  tmpV.set(x2 - x1, y2 - y1, z2 - z1);
-  const dist = tmpV.length();
+// Line of sight between two points: clear when no world surface sits
+// closer than the target.
+function hasLineOfSight(x1, y1, z1, x2, y2, z2) {
+  scratch.set(x2 - x1, y2 - y1, z2 - z1);
+  const dist = scratch.length();
   if (dist < 0.01) return true;
-  raycaster.set(tmpV2.set(x1, y1, z1), tmpV.normalize());
+  raycaster.set(scratch2.set(x1, y1, z1), scratch.normalize());
   raycaster.far = dist;
   return !raycaster.intersectObjects(world.shootables, false)[0];
 }
 
-function enemiesOf(bot) {
+function listFoes(bot) {
   const list = [];
   // No combat outside the live phase: bots must not spot or shoot each
   // other (or the player) during buy, roundEnd or matchEnd.
@@ -372,17 +373,17 @@ function enemiesOf(bot) {
   for (const other of botsApi.bots) {
     if (other.team === bot.team || !other.alive) continue;
     list.push({
-      isPlayer: false, alive: true, pos: other.group.position, vel: tmpV2.set(0, 0, 0), bot: other,
+      isPlayer: false, alive: true, pos: other.group.position, vel: scratch2.set(0, 0, 0), bot: other,
     });
   }
   return list;
 }
 
-// The context botAI sees: time, phase, noise, bomb, and the combat
-// primitives. All combat calls funnel through the phase gates above.
+// What botAI sees: time, phase, noise, bomb, and the combat primitives.
+// Every combat call funnels through the phase gates above.
 const botCtx = {
   get time() {
-    return elapsed;
+    return clock;
   },
   get phase() {
     return game.state.phase;
@@ -393,15 +394,15 @@ const botCtx = {
   get bomb() {
     return game.state.bomb;
   },
-  enemiesOf,
+  enemiesOf: listFoes,
   los(x1, y1, z1, x2, y2, z2) {
-    return los(x1, y1, z1, x2, y2, z2);
+    return hasLineOfSight(x1, y1, z1, x2, y2, z2);
   },
   blocked(x, z) {
     return game.blocked(x, z);
   },
   botShoot(bot, target, err, def) {
-    botShoot(bot, target, err, def);
+    fireBotShot(bot, target, err, def);
   },
   plantStart(bot) {
     game.tryPlant(bot);
@@ -412,7 +413,7 @@ const botCtx = {
 };
 
 // ---- Buy menu ----
-function buyItem(id) {
+function purchase(id) {
   if (game.state.phase !== 'buy') return;
   const money = game.state.money;
   if (id === 'armor') {
@@ -426,30 +427,33 @@ function buyItem(id) {
   } else {
     const def = WEAPONS[id];
     if (!def || money < def.price) return;
-    game.state.money -= def.price;
+    // The P9 is the free sidearm every agent already carries: never charge
+    // for it, mirroring the bots' buyFor rule.
+    const tag = id === 'pistol' ? 0 : def.price;
+    if (tag > 0) game.state.money -= tag;
     if (def.slot === 1) loadout.buyPrimary(id);
-    lastWeapon = id;
+    previousGun = id;
   }
   audio.buy();
   hud.setMoney(game.state.money);
-  hud.openBuy(game.state.money, ownedIds());
+  hud.openBuy(game.state.money, ownedItems());
   hud.setAmmo(loadout.ammoText().mag, loadout.ammoText().reserve, loadout.ammoText().label, loadout.def().name);
 }
 
-function ownedIds() {
+function ownedItems() {
   const owned = [loadout.state.primary, 'pistol'];
   if (player.state.armor >= 100) owned.push('armor');
   if (loadout.state.grenades > 0) owned.push('grenade');
   return owned;
 }
 
-hud.onBuy = buyItem;
+hud.onBuy = purchase;
 
-function toggleBuy(open) {
+function setBuyMenu(open) {
   if (game.state.phase !== 'buy') return;
-  buyOpen = open;
+  shopOpen = open;
   if (open) {
-    hud.openBuy(game.state.money, ownedIds());
+    hud.openBuy(game.state.money, ownedItems());
     if (document.pointerLockElement) document.exitPointerLock();
   } else {
     hud.closeBuy();
@@ -459,31 +463,31 @@ function toggleBuy(open) {
 
 hud.onPlay(() => {
   audio.unlock();
-  if (shot) return;
+  if (shotName) return;
   if (game.state.phase === 'menu' || game.state.phase === 'matchEnd') {
     game.startMatch();
-    toggleBuy(true);
+    setBuyMenu(true);
   }
-  if (game.state.phase === 'buy' && !buyOpen) input.requestLock();
+  if (game.state.phase === 'buy' && !shopOpen) input.requestLock();
   else if (game.state.phase === 'live') input.requestLock();
   else if (game.state.phase === 'roundEnd') input.requestLock();
   hud.hideOverlay();
 });
 
-function onLockChange(locked) {
-  if (shot) return;
+function handleLockChange(locked) {
+  if (shotName) return;
   if (locked) {
     started = true;
     hud.hideOverlay();
-    if (buyOpen) toggleBuy(false);
+    if (shopOpen) setBuyMenu(false);
   } else if (game.state.phase === 'live' && player.state.alive) {
     hud.showOverlay('paused', game.state.score);
   }
 }
 
-function syncCamera() {
-  trauma = Math.max(0, trauma - TRAUMA_DECAY);
-  const shake = trauma * trauma * TRAUMA_SHAKE;
+function updateCamera() {
+  shakeAmt = Math.max(0, shakeAmt - SHAKE_RECOVER);
+  const shake = shakeAmt * shakeAmt * SHAKE_SCALE;
   camera.position.set(body.position.x, body.position.y + body.eye, body.position.z);
   camera.rotation.set(
     body.pitch + (random() * 2 - 1) * shake,
@@ -493,8 +497,8 @@ function syncCamera() {
   );
 }
 
-function step(dt) {
-  elapsed += dt;
+function tick(dt) {
+  clock += dt;
   game.step(dt, input.state);
   // Bots think and move.
   for (const bot of botsApi.bots) {
@@ -508,16 +512,16 @@ function step(dt) {
   if (player.state.alive && (game.state.phase === 'buy' || game.state.phase === 'live')) {
     player.step(dt, input.state.keys);
     const speed = player.groundSpeed();
-    if (speed > MIN_MOVE_SPEED_FOR_STEPS && player.onGround) {
-      stepTimer -= dt;
-      if (stepTimer <= 0) {
-        stepTimer = STEP_INTERVAL;
+    if (speed > STEP_MIN_SPEED && player.onGround) {
+      stepClock -= dt;
+      if (stepClock <= 0) {
+        stepClock = STEP_GAP;
         audio.step();
       }
     }
   }
   loadout.step(dt);
-  stepGrenades(dt);
+  tickGrenades(dt);
   effects.step(dt);
   // HUD numbers, every tick (the HUD dedupes by value).
   const ammoText = loadout.ammoText();
@@ -525,100 +529,100 @@ function step(dt) {
   hud.setAmmo(ammoText.mag, ammoText.reserve, ammoText.label, loadout.def().name);
   hud.setMoney(game.state.money);
   hud.setFeed(game.state.feed);
-  const spreadPx = CROSSHAIR_BASE_PX + loadout.spread(player.groundSpeed()) * CROSSHAIR_SPREAD_SCALE;
-  hud.setCrosshairSpread(Math.min(CROSSHAIR_MAX_PX, spreadPx));
+  const spreadPx = CROSS_REST + loadout.spread(player.groundSpeed()) * CROSS_SCALE;
+  hud.setCrosshairSpread(Math.min(CROSS_CAP, spreadPx));
 }
 
-function frame(now) {
-  requestAnimationFrame(frame);
-  const dt = Math.min((now - lastTime) / 1000, MAX_FRAME_DT);
+function loop(now) {
+  requestAnimationFrame(loop);
+  const dt = Math.min((now - lastTime) / 1000, MAX_DT);
   lastTime = now;
-  if (!frozen) {
+  if (!held) {
     const look = input.takeLook();
     player.look(look.x, look.y);
     const pressed = input.takePressed();
-    if (!shot && game.state.phase !== 'menu' && game.state.phase !== 'matchEnd') {
+    if (!shotName && game.state.phase !== 'menu' && game.state.phase !== 'matchEnd') {
       if (pressed.has('KeyB') || pressed.has('Escape')) {
-        if (hud.isBuyOpen()) toggleBuy(false);
-        else if (game.state.phase === 'buy') toggleBuy(true);
+        if (hud.isBuyOpen()) setBuyMenu(false);
+        else if (game.state.phase === 'buy') setBuyMenu(true);
       }
       if (hud.isBuyOpen()) {
         for (const key of ['Digit1', 'Digit2', 'Digit3', 'Digit4', 'Digit5', 'Digit6']) {
           if (pressed.has(key)) {
-            buyItem(['rifle', 'smg', 'sniper', 'pistol', 'armor', 'grenade'][Number(key.slice(5)) - 1]);
+            purchase(['rifle', 'smg', 'sniper', 'pistol', 'armor', 'grenade'][Number(key.slice(5)) - 1]);
           }
         }
       } else {
         if (pressed.has('Digit1')) {
-          lastWeapon = loadout.state.current;
+          previousGun = loadout.state.current;
           loadout.switchTo(loadout.state.primary);
         }
         if (pressed.has('Digit2')) {
-          lastWeapon = loadout.state.current;
+          previousGun = loadout.state.current;
           loadout.switchTo('pistol');
         }
         if (pressed.has('Digit3')) {
-          lastWeapon = loadout.state.current;
+          previousGun = loadout.state.current;
           loadout.switchTo('grenade');
         }
         if (pressed.has('KeyQ')) {
           const cur = loadout.state.current;
-          loadout.switchTo(lastWeapon);
-          lastWeapon = cur;
+          loadout.switchTo(previousGun);
+          previousGun = cur;
         }
         if (pressed.has('WheelUp') || pressed.has('WheelDown')) {
           const order = [loadout.state.primary, 'pistol', 'grenade'];
           const idx = order.indexOf(loadout.state.current);
           const next = order[(idx + (pressed.has('WheelUp') ? 1 : order.length - 1)) % order.length];
-          lastWeapon = loadout.state.current;
+          previousGun = loadout.state.current;
           loadout.switchTo(next);
         }
         if (pressed.has('KeyG')) {
-          lastWeapon = loadout.state.current;
-          if (loadout.switchTo('grenade') && loadout.ready()) playerShoot(0);
-          else loadout.switchTo(lastWeapon);
+          previousGun = loadout.state.current;
+          if (loadout.switchTo('grenade') && loadout.ready()) firePlayerShot(0);
+          else loadout.switchTo(previousGun);
         }
       }
     }
     // Firing is live-phase only: holding the trigger during buy does nothing.
     if (input.state.firing && game.state.phase === 'live' && player.state.alive) {
       const def = loadout.def();
-      if (loadout.ready() && (def.auto || !wasFiring)) {
-        playerShoot(loadout.spread(player.groundSpeed()));
+      if (loadout.ready() && (def.auto || !firingLastFrame)) {
+        firePlayerShot(loadout.spread(player.groundSpeed()));
       } else if (loadout.ammoText().mag === 0 && def.kind !== 'grenade') {
         loadout.reload();
       }
     }
-    wasFiring = input.state.firing;
+    firingLastFrame = input.state.firing;
     if (input.state.keys.has('KeyR')) loadout.reload();
     accumulator += dt;
     let steps = 0;
-    while (accumulator >= FIXED_STEP && steps < MAX_STEPS_PER_FRAME) {
-      step(FIXED_STEP);
-      accumulator -= FIXED_STEP;
+    while (accumulator >= TICK && steps < MAX_TICKS) {
+      tick(TICK);
+      accumulator -= TICK;
       steps += 1;
     }
-    if (accumulator > FIXED_STEP * MAX_STEPS_PER_FRAME) accumulator = 0;
-    syncCamera();
+    if (accumulator > TICK * MAX_TICKS) accumulator = 0;
+    updateCamera();
   }
   renderer.render(scene, camera);
 }
 
-function settle(steps) {
-  for (let index = 0; index < steps; index += 1) step(FIXED_STEP);
+function settleSteps(steps) {
+  for (let index = 0; index < steps; index += 1) tick(TICK);
 }
 
-function aimAt(point) {
+function lookAtPoint(point) {
   const dx = point.x - body.position.x;
   const dy = point.y - (body.position.y + body.eye);
   const dz = point.z - body.position.z;
   const length = Math.hypot(dx, dy, dz) || 1;
   body.yaw = Math.atan2(-dx, -dz);
   body.pitch = Math.asin(Math.max(-1, Math.min(1, dy / length)));
-  syncCamera();
+  updateCamera();
 }
 
-function placeBotForShot(bot, x, z, yaw, holdNode) {
+function poseBot(bot, x, z, yaw, holdNode) {
   bot.group.position.set(x, 0, z);
   bot.group.visible = true;
   bot.alive = true;
@@ -632,7 +636,7 @@ function placeBotForShot(bot, x, z, yaw, holdNode) {
 }
 
 // ---- Screenshot captures: deterministic scenes for the entry's screenshots. ----
-function runShot(name) {
+function captureScene(name) {
   hud.hideOverlay();
   hud.closeBuy();
   game.startMatch();
@@ -644,12 +648,12 @@ function runShot(name) {
     hud.setPhase('buy', 1, [0, 0]);
     body.pitch = 0;
     player.teleport(0, 0, 17.5, Math.PI);
-    placeBotForShot(vanguard[0], -3, 12, Math.PI, 'vMid');
-    placeBotForShot(vanguard[1], 3, 13, Math.PI, 'vMid');
-    placeBotForShot(sentinel[0], -8, -2, 0, 'midA');
-    placeBotForShot(sentinel[1], 8, -4, 0, 'midB');
-    settle(30);
-    aimAt(new THREE.Vector3(-6, 2.2, -8));
+    poseBot(vanguard[0], -3, 12, Math.PI, 'vMid');
+    poseBot(vanguard[1], 3, 13, Math.PI, 'vMid');
+    poseBot(sentinel[0], -8, -2, 0, 'midA');
+    poseBot(sentinel[1], 8, -4, 0, 'midB');
+    settleSteps(30);
+    lookAtPoint(new THREE.Vector3(-6, 2.2, -8));
     hud.setHealth(100, 0);
     hud.setAmmo(30, 90, '/ ', 'AR-77 Longshot');
     hud.setMoney(800);
@@ -659,11 +663,11 @@ function runShot(name) {
   } else if (name === 'buy') {
     hud.setPhase('buy', 2, [1, 0]);
     player.teleport(0, 0, 16, Math.PI);
-    placeBotForShot(vanguard[0], -4, 12, Math.PI, 'vMid');
-    placeBotForShot(vanguard[1], 4, 12, Math.PI, 'vMid');
-    placeBotForShot(sentinel[0], 0, -6, 0, 'midTop');
-    settle(30);
-    aimAt(new THREE.Vector3(0, 1.6, -6));
+    poseBot(vanguard[0], -4, 12, Math.PI, 'vMid');
+    poseBot(vanguard[1], 4, 12, Math.PI, 'vMid');
+    poseBot(sentinel[0], 0, -6, 0, 'midTop');
+    settleSteps(30);
+    lookAtPoint(new THREE.Vector3(0, 1.6, -6));
     hud.setHealth(100, 100);
     hud.setAmmo(30, 90, '/ ', 'AR-77 Longshot');
     hud.setMoney(3250);
@@ -675,21 +679,21 @@ function runShot(name) {
     game.state.timer = 87;
     hud.setPhase('live', 2, [1, 0]);
     player.teleport(1.5, 0, 8, Math.PI);
-    placeBotForShot(sentinel[0], -2, -4, 0.3, 'midDoor');
-    placeBotForShot(sentinel[1], 3, -7, -0.4, 'midTop');
-    placeBotForShot(vanguard[0], -5, 4, Math.PI, 'midLow');
-    settle(20);
+    poseBot(sentinel[0], -2, -4, 0.3, 'midDoor');
+    poseBot(sentinel[1], 3, -7, -0.4, 'midTop');
+    poseBot(vanguard[0], -5, 4, Math.PI, 'midLow');
+    settleSteps(20);
     const target = sentinel[0].group.position.clone().setY(1.25);
-    aimAt(target);
-    playerShoot(0);
-    settle(1);
+    lookAtPoint(target);
+    firePlayerShot(0);
+    settleSteps(1);
     hud.setHealth(82, 50);
     hud.setAmmo(27, 90, '/ ', 'AR-77 Longshot');
     hud.setMoney(3550);
     hud.setTimer(87, 'ROUND');
     hud.setScore(1, 0, 2);
     hud.setBomb('carry');
-    hud.hitMarker(false, HITMARKER_SHOT_MS);
+    hud.hitMarker(false, MARK_SHOT_MS);
   } else {
     // end: round won, banner up, spike smoke over Site A.
     game.state.phase = 'roundEnd';
@@ -697,13 +701,13 @@ function runShot(name) {
     game.state.round = 2;
     hud.setPhase('roundEnd', 2, [2, 0]);
     player.teleport(-6, 0, 2, Math.PI * 0.85);
-    placeBotForShot(vanguard[0], -10, -4, Math.PI, 'aEntry');
-    placeBotForShot(vanguard[1], -4, -8, Math.PI, 'aSite');
-    placeBotForShot(sentinel[0], 12, -6, 0.5, 'bEntry');
+    poseBot(vanguard[0], -10, -4, Math.PI, 'aEntry');
+    poseBot(vanguard[1], -4, -8, Math.PI, 'aSite');
+    poseBot(sentinel[0], 12, -6, 0.5, 'bEntry');
     effects.smoke(new THREE.Vector3(-12, 1.5, -10), 5, 4);
     effects.smoke(new THREE.Vector3(-10, 2, -8), 3.5, 4);
-    settle(20);
-    aimAt(new THREE.Vector3(-14, 1.8, -12));
+    settleSteps(20);
+    lookAtPoint(new THREE.Vector3(-14, 1.8, -12));
     hud.setHealth(64, 25);
     hud.setAmmo(18, 60, '/ ', 'AR-77 Longshot');
     hud.setMoney(6500);
@@ -712,19 +716,19 @@ function runShot(name) {
     hud.setBomb(null);
     hud.showBanner('VANGUARD WINS THE ROUND', 'Spike detonated at Crane Deck', 4000);
   }
-  paintTwiceThenReady();
+  renderTwiceThenFreeze();
 }
 
-function paintTwiceThenReady() {
+function renderTwiceThenFreeze() {
   let painted = 0;
   function paint() {
     requestAnimationFrame(paint);
-    syncCamera();
+    updateCamera();
     renderer.render(scene, camera);
     painted += 1;
     if (painted === 2) {
       window.__shotReady = true;
-      frozen = true;
+      held = true;
     }
   }
   requestAnimationFrame(paint);
@@ -741,6 +745,6 @@ hud.setAmmo(30, 90, '/ ', 'AR-77 Longshot');
 hud.setMoney(800);
 hud.setTimer(15, 'BUY');
 hud.setScore(0, 0, 1);
-syncCamera();
-if (shot) runShot(shot);
-else requestAnimationFrame(frame);
+updateCamera();
+if (shotName) captureScene(shotName);
+else requestAnimationFrame(loop);
