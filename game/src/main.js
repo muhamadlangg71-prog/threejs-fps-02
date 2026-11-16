@@ -15,8 +15,12 @@
 //    magazine and price.
 // 3. Tactics: the spike plants at Crane Deck or the Depot (world.js
 //    SITE_DEFS); game.js pays the teams each round so the buy menu matters;
-//    botai.js routes bots along waypoints, holds angles and reacts to the
-//    noise game.addNoise() records from shots and grenade blasts.
+//    botai.js routes bots along waypoints, holds angles, reacts to the
+//    noise game.addNoise() records from shots and grenade blasts — and a
+//    bot that hears a noise it cannot see lobs its bought frag grenade at
+//    the sound (botai.js tryGrenade, botThrowGrenade below). Bots buy
+//    grenades with round money (bots.js buyFor), so the grenade is a
+//    team-wide tool, not a player-only one.
 // 4. Map and look: world.js builds the rail yard from one layout table —
 //    two sites, mid, both longs, crates, barrels and hazard-striped plant
 //    pads — with canvas-painted textures, a dusk sky and warm lamps.
@@ -430,6 +434,25 @@ const botCtx = {
   botShoot(bot, target, err, def) {
     fireBotShot(bot, target, err, def);
   },
+  // A bot's grenade throw: arc one bought grenade from the bot's hand at
+  // (tx, tz). The throw is live-phase only (the AI checks first), the
+  // grenade is spent through the loadout so the rifle stays in hand, and
+  // the blast itself is the same lobGrenade/detonate path the player
+  // uses — one grenade, one fuse, one noise event for other bots to hear.
+  botThrowGrenade(bot, tx, tz) {
+    if (game.state.phase !== 'live') return false;
+    if (!bot.loadout || typeof bot.loadout.throwGrenade !== 'function') return false;
+    const from = bot.group.position;
+    const dx = tx - from.x;
+    const dz = tz - from.z;
+    const dist = Math.hypot(dx, dz);
+    if (dist < 1 || dist > 20) return false;
+    if (!bot.loadout.throwGrenade()) return false;
+    const dir = new THREE.Vector3(dx / dist, 0.35, dz / dist).normalize();
+    lobGrenade(new THREE.Vector3(from.x, from.y + 1.2, from.z), dir);
+    game.addNoise(from.x, from.z, NOISE_BOT);
+    return true;
+  },
   plantStart(bot) {
     const channel = game.state && game.state.plant;
     if (channel && channel.active && channel.who) {
@@ -730,6 +753,12 @@ function captureScene(name) {
     poseBot(sentinel[0], -2, -4, 0.3, 'midDoor');
     poseBot(sentinel[1], 3, -7, -0.4, 'midTop');
     poseBot(vanguard[0], -5, 4, Math.PI, 'midLow');
+    // A second teammate ahead-left in the open mid lane, and a smoke puff
+    // drifting off the mid pillar: the frame shows the whole fireteam,
+    // not one duel. (-2, 2) is clear of the mid container and clear of
+    // the shot line to the target at (-2, -4).
+    poseBot(vanguard[1], -2, 2, Math.PI, 'midLow');
+    effects.smoke(new THREE.Vector3(2, 1.5, -2), 3, 4);
     settleSteps(20);
     const target = sentinel[0].group.position.clone().setY(1.25);
     lookAtPoint(target);

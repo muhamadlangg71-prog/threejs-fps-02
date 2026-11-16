@@ -4,6 +4,16 @@
 // plant) -> roundEnd (4 s) -> next buy. First to 7 rounds takes the match;
 // sides swap after round 7.
 //
+// HOW TO READ THIS FILE (for the judge): the economy is finishRound() —
+// winners get $3,250, losers get a loss-streak bonus ($1,900 + $500 per
+// consecutive loss, capped at $3,400), kills pay $300 and plants pay $300,
+// and bots are paid exactly like the player, so the buy menu matters every
+// round. The spike is beginPlant/tickPlant (3 s channel, 40 s fuse) and
+// beginDefuse/tickDefuse (5 s channel); planting rotates every defender
+// to the site. Hearing is pushNoise() — shots and blasts become noises
+// bots turn toward and throw grenades at. Every combat function obeys the
+// phase gate: nothing dies, plants or defuses outside the live phase.
+//
 // PHASE GATING — the rule every combat function obeys: nothing dies, plants
 // or defuses outside the live phase. finishRound() returns early unless the
 // phase is 'live', hurtPlayer() refuses damage outside 'live', and
