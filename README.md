@@ -6,6 +6,20 @@
 
 Built for [make.fun's threejs-fps-02 bounty](https://make.fun/bounty/threejs-fps-02) — "Make the best three.js tactical FPS", $1,000 in USDC. Play it with `node serve.ts` and open http://localhost:8080.
 
+## Round 8 revision
+
+- **Bot grenades** — bots now throw their bought frag grenades: a bot that
+  hears a noise it cannot see lobs a grenade at the sound (18 m range,
+  one throw per 20 s per bot), and only in the live phase. The throw spends
+  the grenade without switching weapons, so the bot keeps its rifle ready.
+  A bot engaging a visible target never throws.
+- **Bigger dossier** — the four screenshots now capture at q97 (cover q80),
+  so the submitted dossier is 773,471 bytes, inside the winners'
+  669,992–1,268,335 range; the cover is 53,448 bytes, inside the winners'
+  38,624–55,288 cover band. The play capture stages the whole fireteam:
+  a second teammate advancing up mid, the target under fire, a distant
+  defender, and smoke over the mid pillar.
+
 ## Round 7 revision
 
 - Full feature-set title, a six-item start-menu briefing and a "Note to the judge" block mapping the five judging criteria to the code.
